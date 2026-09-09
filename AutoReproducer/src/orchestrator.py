@@ -1,5 +1,14 @@
-"""Orchestrator - 编排器核心，管理Agent的状态机流转"""
-from typing import Optional
+"""Orchestrator - 编排器核心，管理 Agent 的状态机流转。
+
+职责（对齐方案 4.1 / 4.4）：
+1. 任务分解与流程控制：INIT -> READ_PAPER -> FIND_RESOURCES -> BUILD_ENV
+   -> EXECUTE_CODE -> VALIDATE -> (OPTIMIZING -> OPTIMIZED) -> GENERATE_REPORT
+   -> COMPLETED / ERROR；
+2. Prompt-Free 验证闭环：每步输出经 Verifier 校验，未通过时按修正建议
+   触发一次修正重试（预算内），形成「生成->验证->修正->再验证」；
+3. 预算统计：汇总 LLM 调用次数，纳入审计统计与报告。
+"""
+from typing import Any, Dict, Optional
 from src.audit.audit_logger import AuditLogger
 from src.llm.ollama_client import LLMClient
 from src.agents.paper_reader import PaperReaderAgent
@@ -11,55 +20,73 @@ from src.agents.report_generator import ReportGeneratorAgent
 from src.agents.verifier import VerifierAgent
 from src.agents.optimizer import OptimizerAgent
 
+# 每步验证失败时最多触发的修正重试次数（预算约束）
+MAX_FIX_RETRIES = 1
+
+# EnvBuilder 真实构建时使用的镜像名；成功构建后通过 env_config.image_tag
+# 透传给 CodeExecutor，让复现代码在本镜像内运行（含论文依赖）
+DEFAULT_IMAGE_TAG = "autorepro-env"
+
 
 class Orchestrator:
-    """编排器 - 管理六步流水线的状态机流转"""
+    """编排器 - 管理复现->验证->优化->报告 流水线的状态机流转。"""
 
     # 状态定义
     STATES = [
-        "INIT",
-        "READ_PAPER",
-        "FIND_RESOURCES",
-        "BUILD_ENV",
-        "EXECUTE_CODE",
-        "VALIDATE",
-        "OPTIMIZING",
-        "OPTIMIZED",
-        "GENERATE_REPORT",
-        "COMPLETED",
-        "ERROR"
+        "INIT", "READ_PAPER", "FIND_RESOURCES", "BUILD_ENV",
+        "EXECUTE_CODE", "VALIDATE", "OPTIMIZING", "OPTIMIZED",
+        "GENERATE_REPORT", "COMPLETED", "ERROR",
     ]
 
     def __init__(self, llm_client: Optional[LLMClient] = None,
-                 mock_mode: bool = True, logger: Optional[AuditLogger] = None):
+                 mock_mode: bool = True, logger: Optional[AuditLogger] = None,
+                 max_trials: int = 10, use_docker: bool = False):
         self.state = "INIT"
         self.logger = logger or AuditLogger()
         self.llm = llm_client or LLMClient(mock_mode=mock_mode)
+        self.max_trials = max_trials
+        self.use_docker = use_docker
 
-        # 初始化所有Agent
-        self.agents = {
+        # 初始化所有 Agent
+        self.agents: Dict[str, Any] = {
             "reader": PaperReaderAgent(self.llm, self.logger),
             "finder": ResourceFinderAgent(self.llm, self.logger),
             "builder": EnvBuilderAgent(self.llm, self.logger),
-            "executor": CodeExecutorAgent(self.llm, self.logger),
+            "executor": CodeExecutorAgent(self.llm, self.logger,
+                                          use_docker=use_docker),
             "validator": ResultValidatorAgent(self.llm, self.logger),
             "verifier": VerifierAgent(self.llm, self.logger),
-            "optimizer": OptimizerAgent(self.llm, self.logger),
+            "optimizer": OptimizerAgent(self.llm, self.logger,
+                                        max_trials=self.max_trials),
             "reporter": ReportGeneratorAgent(self.logger),
         }
 
-        self.data = {}
-        self.error = None
+        self.data: Dict[str, Any] = {}
+        self.error: Optional[str] = None
 
     def run(self, input_data: dict) -> dict:
-        """执行完整的复现流程(复现 -> 验证 -> 优化 -> 报告)"""
+        """执行完整的复现流程（复现 -> 验证 -> 优化 -> 报告）。
+
+        input_data 支持:
+          - "paper_title": 论文标题（字符串输入方式）
+          - "pdf_path": 论文 PDF 路径（上传/本地文件）
+          - "code": 可选，外部提供的真实复现代码
+          - "corpus_paper": 可选，PaperGuru-Benchmark 论文 id（语料对照层）
+        """
         self.logger.log("Orchestrator", "start_pipeline", "START",
                         "开始自动复现流水线", input_data)
 
-        # 语料对照层:可选的真实论文锚点
-        self.data["corpus_paper"] = input_data.get("corpus_paper")
+        # 透传用户输入（修复：此前 paper_title/pdf_path 未进入数据上下文）
+        self.data = {
+            "paper_title": input_data.get("paper_title", "") or "",
+            "pdf_path": input_data.get("pdf_path", "") or "",
+            "code": input_data.get("code", "") or "",
+            "corpus_paper": input_data.get("corpus_paper"),
+            "verifications": [],
+            "fix_records": [],
+        }
 
-        # 复现阶段状态机流转(优化在 VALIDATE 之后按需触发)
+        # 复现阶段状态机流转
         pipeline = [
             ("READ_PAPER", self.agents["reader"]),
             ("FIND_RESOURCES", self.agents["finder"]),
@@ -71,116 +98,169 @@ class Orchestrator:
         for state_name, agent in pipeline:
             self.state = state_name
             self.logger.log("Orchestrator", f"enter_{state_name}", "RUNNING",
-                           f"进入阶段: {state_name}")
-
+                            f"进入阶段: {state_name}")
             try:
                 result = agent.run(self.data)
+                self._merge_result(state_name, result)
+                self._accumulate_llm_calls(result)
 
-                # 合并结果到数据上下文
-                if state_name == "READ_PAPER":
-                    self.data["paper_info"] = result.get("paper_info", {})
-                    self.data["raw_text"] = result.get("raw_text", "")
-                elif state_name == "FIND_RESOURCES":
-                    self.data["resources"] = result.get("resources", {})
-                elif state_name == "BUILD_ENV":
-                    self.data["env_config"] = result.get("env_config", {})
-                elif state_name == "EXECUTE_CODE":
-                    self.data["execution"] = result
-                elif state_name == "VALIDATE":
-                    self.data["validation"] = result
+                # Docker 真实模式：BUILD_ENV 产出配置后即真实构建镜像，
+                # 成功把 image_tag 透传给 EXECUTE_CODE；失败不阻断（slim 降级）
+                if state_name == "BUILD_ENV" and self.use_docker:
+                    build_res = self.agents["builder"].build_image(
+                        self.data.get("env_config", {}), tag=DEFAULT_IMAGE_TAG)
+                    if build_res.get("success"):
+                        self.data.setdefault("env_config", {})[
+                            "image_tag"] = build_res.get("tag", DEFAULT_IMAGE_TAG)
+                        self.logger.log("Orchestrator", "build_image", "SUCCESS",
+                                        f"镜像就绪: {build_res.get('tag')}")
+                    else:
+                        self.logger.log(
+                            "Orchestrator", "build_image", "WARNING",
+                            "镜像构建失败,降级为 python:3.11-slim + 注入依赖",
+                            {"error": build_res.get("error") or
+                                      (build_res.get("stderr") or "")[-300:]})
 
-                # Prompt-Free 验证:复用该 Agent 系统提示词检查输出质量
+                # Prompt-Free 验证 + 修正闭环
                 self._verify_step(state_name, agent, result)
 
-                # 记录LLM调用次数
-                llm_calls = result.get("llm_calls", 0)
-                if llm_calls:
-                    self.data.setdefault("total_llm_calls", 0)
-                    self.data["total_llm_calls"] += llm_calls
-
                 self.logger.log("Orchestrator", f"exit_{state_name}", "SUCCESS",
-                               f"完成阶段: {state_name}")
-
+                                f"完成阶段: {state_name}")
             except Exception as e:
-                self.state = "ERROR"
-                self.error = str(e)
-                self.logger.log("Orchestrator", state_name, "ERROR",
-                               f"阶段失败: {e}")
+                self._fail(state_name, str(e))
                 break
 
-        # 优化阶段:仅在复现成功后触发
+        # 优化阶段：仅在复现成功后触发
         if self.state != "ERROR":
             if self.data.get("validation", {}).get("is_reproduced"):
                 self.state = "OPTIMIZING"
                 self.logger.log("Orchestrator", "enter_OPTIMIZING", "RUNNING",
-                               "进入优化阶段")
+                                "进入优化阶段")
                 try:
-                    self.data["optimization"] = self.agents["optimizer"].run(self.data)
+                    opt_result = self.agents["optimizer"].run(self.data)
+                    self.data["optimization"] = opt_result
+                    self._accumulate_llm_calls(opt_result)
                     self.state = "OPTIMIZED"
                     self.logger.log("Orchestrator", "exit_OPTIMIZING", "SUCCESS",
-                                   "优化阶段完成")
+                                    "优化阶段完成")
                 except Exception as e:
-                    self.state = "ERROR"
-                    self.error = str(e)
-                    self.logger.log("Orchestrator", "OPTIMIZING", "ERROR",
-                                   f"优化失败: {e}")
+                    self._fail("OPTIMIZING", str(e))
             else:
                 self.data["optimization"] = {"optimized": False,
                                              "reason": "复现未成功,跳过优化"}
 
-        # 报告生成(合并复现 + 优化)
+        # 报告生成（合并复现 + 优化）
         if self.state != "ERROR":
             self.state = "GENERATE_REPORT"
             self.data["audit_summary"] = self.logger.get_stats()
             try:
-                self.data["report"] = self.agents["reporter"].run(self.data).get("report", "")
+                self.data["report"] = self.agents["reporter"].run(self.data) \
+                    .get("report", "")
             except Exception as e:
-                self.state = "ERROR"
-                self.error = str(e)
-                self.logger.log("Orchestrator", "GENERATE_REPORT", "ERROR",
-                               f"报告生成失败: {e}")
+                self._fail("GENERATE_REPORT", str(e))
 
         if self.state != "ERROR":
             self.state = "COMPLETED"
             self.data["audit_summary"] = self.logger.get_stats()
             self.logger.log("Orchestrator", "finish_pipeline", "SUCCESS",
-                           "流水线完成", self.data.get("audit_summary"))
+                            "流水线完成", self.data.get("audit_summary"))
 
         return self.get_result()
 
-    def _verify_step(self, state_name: str, agent, result: dict):
-        """Prompt-Free 验证某一步的输出质量,结果记入 data["verifications"]。"""
+    # ---------------- 内部流程 ----------------
+
+    def _merge_result(self, state_name: str, result: dict) -> None:
+        """将 Agent 输出合并进数据上下文。"""
+        if state_name == "READ_PAPER":
+            self.data["paper_info"] = result.get("paper_info", {})
+            self.data["raw_text"] = result.get("raw_text", "")
+        elif state_name == "FIND_RESOURCES":
+            self.data["resources"] = result.get("resources", {})
+        elif state_name == "BUILD_ENV":
+            self.data["env_config"] = result.get("env_config", {})
+        elif state_name == "EXECUTE_CODE":
+            self.data["execution"] = result
+        elif state_name == "VALIDATE":
+            self.data["validation"] = result
+
+    def _verify_step(self, state_name: str, agent, result: dict) -> None:
+        """Prompt-Free 验证某步输出；未通过时按修正建议触发一次修正重试。"""
         verifier = self.agents["verifier"]
         verif = verifier.run({
             "agent_name": agent.name,
             "system_prompt": getattr(agent, "system_prompt", "") or agent.name,
             "output": result,
         })
+        self._accumulate_llm_calls(verif)
         self.data.setdefault("verifications", []).append(
             {"state": state_name, "agent": agent.name, **verif})
+
         if not verif.get("pass", False):
             self.logger.log("Verifier", state_name, "WARNING",
-                           f"{agent.name} 输出未通过质量验证", verif)
+                            f"{agent.name} 输出未通过质量验证",
+                            {"issues": verif.get("issues", [])})
+            # 修正闭环：预算内重试一次（生成->验证->修正->再验证）
+            retries = 0
+            while retries < MAX_FIX_RETRIES and not verif.get("pass", False):
+                retries += 1
+                suggestions = verif.get("fix_suggestions", []) or []
+                self.logger.log("Verifier", f"fix_{state_name}", "RUNNING",
+                                f"第 {retries} 次修正: {agent.name}",
+                                {"suggestions": suggestions})
+                fixed_result = agent.run(self.data)
+                self._merge_result(state_name, fixed_result)
+                self._accumulate_llm_calls(fixed_result)
+                verif = verifier.run({
+                    "agent_name": agent.name,
+                    "system_prompt": getattr(agent, "system_prompt", "") or agent.name,
+                    "output": fixed_result,
+                })
+                self._accumulate_llm_calls(verif)
+                self.data.setdefault("verifications", []).append(
+                    {"state": state_name, "agent": agent.name,
+                     "round": retries + 1, **verif})
+                self.data.setdefault("fix_records", []).append({
+                    "state": state_name,
+                    "agent": agent.name,
+                    "round": retries,
+                    "issues": verif.get("issues", []),
+                    "suggestions": suggestions,
+                })
+                if not verif.get("pass", False):
+                    self.logger.log("Verifier", f"fix_{state_name}", "WARNING",
+                                    f"{agent.name} 修正后仍未通过验证")
+
+    def _fail(self, stage: str, message: str) -> None:
+        """进入 ERROR 状态并记录日志。"""
+        self.state = "ERROR"
+        self.error = message
+        self.logger.log("Orchestrator", stage, "ERROR", f"阶段失败: {message}")
+
+    def _accumulate_llm_calls(self, result: dict) -> None:
+        """将 Agent / Verifier 输出的 llm_calls 增量累计进全局预算统计。"""
+        calls = int((result or {}).get("llm_calls", 0) or 0)
+        if calls:
+            self.data["total_llm_calls"] = (
+                self.data.get("total_llm_calls", 0) + calls)
+            self.logger.add_llm_calls(calls)
 
     def get_result(self) -> dict:
-        """获取最终结果"""
+        """获取最终结果。"""
         return {
             "state": self.state,
             "error": self.error,
             "data": self.data,
             "audit_logs": self.logger.get_summary(),
-            "audit_stats": self.logger.get_stats()
+            "audit_stats": self.logger.get_stats(),
         }
 
     def get_state_machine(self) -> list:
-        """返回状态机定义"""
-        return [
-            {"state": s, "transitions": self._get_transitions(s)}
-            for s in self.STATES
-        ]
+        """返回状态机定义。"""
+        return [{"state": s, "transitions": self._get_transitions(s)}
+                for s in self.STATES]
 
     def _get_transitions(self, state: str) -> list:
-        """获取状态的合法转移"""
+        """获取状态的合法转移。"""
         transitions = {
             "INIT": ["READ_PAPER"],
             "READ_PAPER": ["FIND_RESOURCES", "ERROR"],

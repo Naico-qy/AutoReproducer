@@ -1,13 +1,16 @@
-"""VerifierAgent - Prompt-Free 质量验证 Agent"""
+"""VerifierAgent - Prompt-Free 质量验证 Agent（方案创新点三）。
+
+复用各 Agent 自身的系统提示词作为质量标准，检查输出质量；
+验证不通过时给出修正建议（fix_suggestions），供优化闭环触发修正。
+"""
 import json
+import re
+from typing import Dict
 from src.base_agent import BaseAgent
 
 
 class VerifierAgent(BaseAgent):
-    """复用各 Agent 自身的系统提示词作为质量标准,检查其输出质量(Prompt-Free)。
-
-    不手写额外验证提示词,而是直接读取目标 Agent 的 system_prompt 作为判据。
-    """
+    """复用目标 Agent 的 system_prompt 作为判据进行质量验证（Prompt-Free）。"""
 
     system_prompt = "验证各步骤输出是否满足其自身系统提示词定义的质量标准"
 
@@ -18,7 +21,7 @@ class VerifierAgent(BaseAgent):
     def run(self, input_data: dict) -> dict:
         """input_data: {"agent_name", "system_prompt", "output"}"""
         agent_name = input_data.get("agent_name", "未知Agent")
-        standard = input_data.get("system_prompt", "")
+        standard = input_data.get("system_prompt", "") or ""
         output = input_data.get("output", "")
 
         self.log("verify", "START", f"验证 {agent_name} 的输出", input_data)
@@ -33,15 +36,73 @@ class VerifierAgent(BaseAgent):
 待验证输出:
 {str(output)[:2000]}
 """
-        llm_result = self.llm.chat(prompt)
-        try:
-            parsed = json.loads(llm_result)
-        except json.JSONDecodeError:
-            parsed = {"pass": True, "issues": [],
-                      "fix_suggestions": [], "confidence": 0.9}
+        llm_result = self.llm.chat(prompt, task="verifier")
+        parsed = self._parse_json(llm_result)
+        if not parsed or "pass" not in parsed:
+            parsed = self._local_check(agent_name, output, standard)
 
         passed = bool(parsed.get("pass", False))
+        self.log_experiment(
+            "VERIFY", f"Prompt-Free 验证 {agent_name} 输出",
+            inputs={"standard": standard[:200]},
+            outputs=parsed,
+            result={"pass": passed},
+        )
         self.log("verify", "SUCCESS" if passed else "WARNING",
                  f"{agent_name} 验证{'通过' if passed else '未通过'} "
                  f"(置信度 {parsed.get('confidence', 0):.2f})", parsed)
-        return parsed
+        return {**parsed, "llm_calls": self._delta_llm_calls()}
+
+    # ---------------- 内部工具 ----------------
+
+    def _delta_llm_calls(self) -> int:
+        """本 Agent 本次 run() 期间新增的 LLM 调用次数（用于预算统计）。"""
+        total = self.llm.get_call_count()
+        delta = total - getattr(self, "_last_call_count", 0)
+        self._last_call_count = total
+        return max(delta, 0)
+
+    # ---------------- 本地规则校验（LLM 不可用时兜底） ----------------
+
+    @staticmethod
+    def _local_check(agent_name: str, output, standard: str) -> Dict:
+        """基于结构完整性的确定性检查：关键字段存在且 non-trivial。"""
+        problems = []
+        suggestions = []
+        if output is None:
+            problems.append("输出为空")
+            suggestions.append("Agent 应返回结构化结果 dict")
+        else:
+            text = str(output)
+            if len(text.strip()) < 5:
+                problems.append("输出内容过短,缺少实质信息")
+                suggestions.append("补充关键字段(如 title/paper_info/results)")
+            # 结果类输出必须包含关键字段
+            for field in ("paper_info", "resources", "env_config",
+                          "execution", "validation", "report"):
+                if field in text and ("{}" in text or "None" in text):
+                    problems.append(f"字段 {field} 为空值")
+                    suggestions.append(f"确保 {field} 包含实际内容")
+        return {"pass": len(problems) == 0, "issues": problems,
+                "fix_suggestions": suggestions,
+                "confidence": 0.8 if not problems else 0.5}
+
+    @staticmethod
+    def _parse_json(text: str) -> Dict:
+        for candidate in (text, re.sub(r"```(?:json)?\s*(.*?)```", r"\1", text, flags=re.DOTALL)):
+            if not candidate or not candidate.strip():
+                continue
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                match = re.search(r"\{.*\}", candidate, re.DOTALL)
+                if match:
+                    try:
+                        parsed = json.loads(match.group())
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except json.JSONDecodeError:
+                        continue
+        return {}
