@@ -152,6 +152,17 @@ def run_pipeline_core(progress_path: str,
         return result
 
     logger = AuditLogger()
+    error_msg: Optional[str] = None
+    emitted = 0
+
+    def _emit_new_logs() -> None:
+        """只把新增的审计日志追加进进度文件，避免每次全量重发造成重复。"""
+        nonlocal emitted
+        entries = logger.get_summary()
+        for entry in entries[emitted:]:
+            store.emit({"type": "log", "log": entry})
+        emitted = len(entries)
+
     llm = LLMClient(
         mock_mode=mock_mode,
         model="" if mock_mode else model_name,
@@ -203,13 +214,13 @@ def run_pipeline_core(progress_path: str,
             logger.add_llm_calls(int(result.get("llm_calls", 0) or 0) + int(verif.get("llm_calls", 0) or 0))
 
             _emit_state(store, stage_name, display_name, "success")
-            for entry in logger.get_summary():
-                store.emit({"type": "log", "log": entry})
+            _emit_new_logs()
         except Exception as e:
+            error_msg = f"{stage_name} 阶段异常: {e}"
+            logger.log(stage_name, "run", "ERROR", f"异常: {e}")
             _emit_state(store, stage_name, display_name, "error")
             _set_current("ERROR")
-            for entry in logger.get_summary():
-                store.emit({"type": "log", "log": entry})
+            _emit_new_logs()
             break
 
     _emit_state(store, _current(), VERIFIER_NAME, "success")
@@ -224,6 +235,8 @@ def run_pipeline_core(progress_path: str,
                 _set_current("OPTIMIZED")
                 _emit_state(store, "OPTIMIZED", OPTIMIZER_NAME, "success")
             except Exception as e:
+                error_msg = f"优化阶段异常: {e}"
+                logger.log(OPTIMIZER_NAME, "optimize", "ERROR", f"异常: {e}")
                 _set_current("ERROR")
                 _emit_state(store, "ERROR", OPTIMIZER_NAME, "error")
         else:
@@ -235,8 +248,7 @@ def run_pipeline_core(progress_path: str,
                 reason = "复现未成功,跳过优化"
             data["optimization"] = {"optimized": False, "reason": reason}
             _emit_state(store, _current(), OPTIMIZER_NAME, "waiting")
-        for entry in logger.get_summary():
-            store.emit({"type": "log", "log": entry})
+        _emit_new_logs()
 
     # 报告生成（合并复现 + 优化）
     if _current() != "ERROR":
@@ -249,10 +261,11 @@ def run_pipeline_core(progress_path: str,
                 .get("report", "")
             _emit_state(store, "GENERATE_REPORT", REPORTER_NAME, "success")
         except Exception as e:
+            error_msg = f"报告生成阶段异常: {e}"
+            logger.log(REPORTER_NAME, "generate_report", "ERROR", f"异常: {e}")
             _set_current("ERROR")
             _emit_state(store, "ERROR", REPORTER_NAME, "error")
-        for entry in logger.get_summary():
-            store.emit({"type": "log", "log": entry})
+        _emit_new_logs()
 
     if _current() != "ERROR":
         _set_current("COMPLETED")
@@ -278,12 +291,23 @@ def run_pipeline_core(progress_path: str,
         except Exception:
             pass  # 落盘失败不阻断主流程
 
+    # 终态落盘：无论 COMPLETED 还是 ERROR，都在 ledger 末条写终态信息，
+    # 供历史列表回填 state / duration_sec / llm_calls。
+    stats = logger.get_stats()
+    logger.log_experiment(
+        "FINISH", "流水线终止",
+        inputs={"paper_title": paper_title},
+        outputs={},
+        result={"state": _current(),
+                "duration_sec": stats["duration_sec"],
+                "llm_calls": stats["llm_calls"]})
+
     result = {
         "state": _current(),
-        "error": None,
+        "error": error_msg,
         "data": data,
         "audit_logs": logger.get_summary(),
-        "audit_stats": logger.get_stats(),
+        "audit_stats": stats,
         "report_path": report_path,
         "session_id": logger.session_id,
     }

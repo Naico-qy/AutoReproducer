@@ -252,6 +252,9 @@ with tab1:
     if snap:
         if snap["result"]:
             st.session_state.result = snap["result"]
+        if not snap["running"]:
+            # done 或 error 两种终态都会把 running 置 False；后台提前失败时
+            # 没有 result 事件，但必须清除 running，否则「开始复现」永久禁用。
             st.session_state.running = False
         if snap.get("agent_status"):
             for k, v in snap["agent_status"].items():

@@ -11,6 +11,7 @@
 
 运行: python -m pytest tests/test_backend_pipeline.py -v
 """
+import json
 import sys
 import time
 from pathlib import Path
@@ -132,3 +133,60 @@ def test_run_pipeline_background_error_is_reported(tmp_path):
     thread.join(timeout=30)
     # 线程兜底写 error 事件失败也不崩溃；此处保证线程正常收尾
     assert not thread.is_alive()
+
+
+# ---------------- 3. 阶段异常不吞 + 日志去重 + 终态落盘 ----------------
+
+def test_run_pipeline_core_no_duplicate_logs(tmp_path):
+    """get_summary() 不再全量重发：进度文件里同一条审计日志只出现一次。"""
+    progress = tmp_path / "p.jsonl"
+    result = run_pipeline_core(str(progress), paper_title="Dummy Paper",
+                               mock_mode=True, max_trials=2)
+    assert result["state"] == "COMPLETED", result.get("error")
+
+    logs = []
+    for line in progress.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        ev = json.loads(line)
+        if ev.get("type") == "log":
+            logs.append(ev["log"])
+    assert logs, "进度文件应包含审计日志"
+    unique = {json.dumps(l, sort_keys=True, ensure_ascii=False) for l in logs}
+    assert len(unique) == len(logs), "进度文件存在重复审计日志"
+
+
+def test_run_pipeline_core_reports_stage_error(tmp_path, monkeypatch):
+    """阶段异常不再被吞：result['error'] 非 None，且 ledger 末条有 FINISH 终态。"""
+    import frontend.backend_pipeline as bp
+
+    class _BoomAgent:
+        name = "PaperReader"
+        system_prompt = ""
+        def run(self, data):
+            raise RuntimeError("boom")
+
+    class _BoomOrch:
+        def __init__(self, **kwargs):
+            self.agents = {k: _BoomAgent() for k in
+                           ("reader", "finder", "builder", "executor",
+                            "validator", "verifier", "optimizer", "reporter")}
+
+    monkeypatch.setattr(bp, "Orchestrator", _BoomOrch)
+    progress = tmp_path / "p.jsonl"
+    result = bp.run_pipeline_core(str(progress), paper_title="Dummy",
+                                  mock_mode=True, max_trials=2)
+
+    assert result["state"] == "ERROR"
+    assert result["error"] and "boom" in result["error"]
+
+    # ledger 末条 FINISH 记录携带终态（真实落盘到项目 data/experiment_ledger）
+    root = Path(__file__).resolve().parents[1]
+    ledger_file = (root / "data" / "experiment_ledger"
+                   / f"ledger_{result['session_id']}.jsonl")
+    records = [json.loads(line) for line in
+               ledger_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    finish = records[-1]
+    assert finish["phase"] == "FINISH"
+    assert finish["result"]["state"] == "ERROR"

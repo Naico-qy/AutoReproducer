@@ -43,6 +43,33 @@ def _mk_ledger(data_dir: Path, sid: str, title: str = "测试论文", state: str
     _write_jsonl(data_dir / "experiment_ledger" / f"ledger_{sid}.jsonl", [record])
 
 
+def _mk_real_ledger(data_dir: Path, sid: str, title: str = "梯度下降实验",
+                    state: str = "COMPLETED", duration: float = 12.5,
+                    llm_calls: int = 35):
+    """构造「真实结构」ledger：首条 READ_PAPER（outputs.title + 空 result），
+    末条 FINISH（result 携带终态 state/duration/llm_calls）。"""
+    records = [
+        {
+            "session_id": sid,
+            "phase": "READ_PAPER",
+            "decision": "解析论文",
+            "inputs": {"paper_title": title},
+            "outputs": {"title": title, "method": "梯度下降", "metrics": {}},
+            "result": {},
+        },
+        {
+            "session_id": sid,
+            "phase": "FINISH",
+            "decision": "流水线终止",
+            "inputs": {"paper_title": title},
+            "outputs": {},
+            "result": {"state": state, "duration_sec": duration,
+                       "llm_calls": llm_calls},
+        },
+    ]
+    _write_jsonl(data_dir / "experiment_ledger" / f"ledger_{sid}.jsonl", records)
+
+
 # ---------- list_sessions ----------
 
 def test_list_sessions_empty(fake_data: Path):
@@ -91,6 +118,39 @@ def test_list_sessions_sorted_desc(fake_data: Path):
     _mk_ledger(fake_data, "20260910_110000", "新")
     sids = [s["session_id"] for s in list_sessions()]
     assert sids == ["20260910_110000", "20260910_090000"]
+
+
+def test_list_sessions_real_ledger_structure(fake_data: Path):
+    """真实 ledger：标题在首条 READ_PAPER、终态在末条 FINISH —— 不再恒显未知/0/0。"""
+    _mk_real_ledger(fake_data, "20260910_100000", "梯度下降实验",
+                    state="COMPLETED", duration=12.5, llm_calls=35)
+    sessions = list_sessions()
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s["paper_title"] == "梯度下降实验"
+    assert s["state"] == "COMPLETED"
+    assert s["duration_sec"] == 12.5
+    assert s["llm_calls"] == 35
+
+
+def test_list_sessions_real_ledger_error_state(fake_data: Path):
+    """终态 ERROR 也要如实回填，而非「未知」。"""
+    _mk_real_ledger(fake_data, "20260910_110000", "某论文", state="ERROR",
+                    duration=2.0, llm_calls=3)
+    sessions = list_sessions()
+    assert sessions[0]["state"] == "ERROR"
+    assert sessions[0]["llm_calls"] == 3
+
+
+def test_list_sessions_real_ledger_running_fallback(fake_data: Path):
+    """末条 result 缺失终态时回退 RUNNING/0/0，不崩溃。"""
+    _write_jsonl(
+        fake_data / "experiment_ledger" / "ledger_20260910_120000.jsonl",
+        [{"phase": "READ_PAPER", "outputs": {"title": "半途论文"}, "result": {}}])
+    s = list_sessions()[0]
+    assert s["state"] == "RUNNING"
+    assert s["duration_sec"] == 0
+    assert s["llm_calls"] == 0
 
 
 # ---------- get_storage_stats ----------

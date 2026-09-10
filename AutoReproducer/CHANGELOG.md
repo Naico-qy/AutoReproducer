@@ -5,6 +5,40 @@
 
 ---
 
+## [2026.09.10-3] - 2026-09-10
+
+### 修复（前端可观测性 / 诚实性，Batch 2）
+
+- **前端不再卡「运行中」**：`app.py` 原来只在 `snap["result"]` 为真时清
+  `st.session_state.running`，但后台线程兜底崩溃时只写 `error` 事件、不写
+  `result`，导致「开始复现」按钮永久禁用。改为用 `snap["running"]`
+  （`ProgressStore.read_snapshot` 在 `done` 与 `error` 两种终态都置 False）
+  作为终态判据。
+- **历史列表不再恒显「未知 / 0 / 0」**：
+  - 写侧 `frontend/backend_pipeline.py::run_pipeline_core` 收尾处（COMPLETED 与
+    ERROR 都执行）新增一条 `FINISH` 终态 ledger 记录，携带
+    `result.state / duration_sec / llm_calls`（复用 `logger.get_stats()`）；
+  - 读侧 `frontend/history_manager.py::list_sessions` 由「只读首条」改为
+    「读全量记录」：标题取首个含 `outputs.title` 的记录，终态取末条 `result`，
+    缺失时回退 `RUNNING`/0/0。
+- **异常不再被吞**：`backend_pipeline.py` 三处 `except Exception as e:` 原先把
+  `e` 抓了不用、`result["error"]` 硬编码 `None`；现改为 `error_msg` 累积真实异常
+  文本并 `logger.log(...ERROR...)` 留审计，随 `done` 事件透出，前端
+  `result.state==ERROR` 分支即可展示原因。
+- **审计日志去重**：`logger.get_summary()` 返回全量 entries，原来每阶段结束后
+  全量重发导致进度文件同一条日志重复出现；新增 `_emit_new_logs()` 用 `emitted`
+  游标只发增量。
+
+### 测试
+
+- `tests/test_history_manager.py` 新增 3 例：真实结构 ledger（标题首条 / 终态
+  末条）、终态 ERROR 回填、末条缺失终态回退 RUNNING。
+- `tests/test_backend_pipeline.py` 新增 2 例：进度文件无重复审计日志；阶段异常
+  时 `result["error"]` 非 None 且 ledger 末条存在 FINISH 记录。
+- 全量 **131 passed, 1 skipped**。
+
+---
+
 ## [2026.09.10-2] - 2026-09-10
 
 ### 修复（复现核心闭环，Batch 1）

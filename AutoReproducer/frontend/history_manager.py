@@ -55,15 +55,21 @@ def list_sessions() -> List[Dict[str, Any]]:
                 "progress_file": "",
                 "report_path": "",
             })
-            # 读取 ledger 第一条记录获取标题
+            # 读取 ledger 全量记录：标题取首个含 outputs.title 的记录，
+            # 终态（state/duration/llm_calls）取末条 FINISH 记录的 result。
             sessions[sid]["ledger_size_bytes"] = f.stat().st_size
             try:
                 with open(f, "r", encoding="utf-8") as fh:
-                    first = json.loads(fh.readline())
-                outputs = first.get("outputs", {})
-                sessions[sid]["paper_title"] = outputs.get("title", outputs.get("paper_info", {}).get("title", ""))
-                result = first.get("result", {})
-                if result:
+                    records = [json.loads(line) for line in fh if line.strip()]
+                for rec in records:
+                    outputs = rec.get("outputs", {}) or {}
+                    title = outputs.get("title") or \
+                        (outputs.get("paper_info") or {}).get("title", "")
+                    if title:
+                        sessions[sid]["paper_title"] = title
+                        break
+                if records:
+                    result = records[-1].get("result", {}) or {}
                     sessions[sid]["state"] = result.get("state", "RUNNING")
                     sessions[sid]["duration_sec"] = result.get("duration_sec", 0)
                     sessions[sid]["llm_calls"] = result.get("llm_calls", 0)
