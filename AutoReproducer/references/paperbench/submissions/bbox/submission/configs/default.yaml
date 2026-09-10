@@ -1,0 +1,96 @@
+# BBox-Adapter default hyperparameters.
+#
+# All values are taken verbatim from Appendix H.2 of:
+#   Sun et al., "BBox-Adapter: Lightweight Adapting for Black-Box LLMs", ICML 2024.
+#
+# Where the paper specifies a per-dataset value (e.g. backbone for TruthfulQA),
+# we choose the GSM8K/StrategyQA/ScienceQA setting as the default; per-task
+# overrides can be loaded from configs/<task>.yaml.
+
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Adapter (g_theta) — see paper §3.1, Appendix H.2.
+# "deberta-v3-base (86M)" or "deberta-v3-large (304M)" for the 0.1B / 0.3B
+# variants reported in Table 2.  bert-base-cased (110M) for TruthfulQA.
+# ---------------------------------------------------------------------------
+adapter:
+  backbone: microsoft/deberta-v3-base # 0.1B variant
+  hidden_dim: 768 # DeBERTa-v3-base hidden size
+  max_length: 512 # paper: max generation length 512
+  dropout: 0.1
+  pooling: cls # CLS-token pooling for the energy head
+
+# ---------------------------------------------------------------------------
+# Optimisation — Appendix H.2:
+#   "We set the learning rate eta as 5e-6, the batch size as 64,
+#    and the number of training steps as 6000.  We employed AdamW
+#    optimizer with a weight decay of 0.01."
+# ---------------------------------------------------------------------------
+optim:
+  optimizer: adamw
+  lr: 5.0e-6
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  scheduler: linear
+  warmup_steps: 100
+  max_grad_norm: 1.0
+
+train:
+  batch_size: 64
+  num_steps: 6000
+  num_iterations: 4 # online adaptation rounds T (paper Fig. 3b)
+  alpha: 0.01 # ℓ2 spectral-norm coefficient α in Eq. (3)
+  loss: nce # 'nce' (paper) or 'mlm' (ablation Table 5)
+  fp16: false # paper does not specify; default off
+  gradient_accumulation_steps: 1
+  log_every: 50
+  save_every: 1000
+
+# ---------------------------------------------------------------------------
+# Black-box LLM proposal generator — §3.3 / Appendix H.2.
+# ---------------------------------------------------------------------------
+llm:
+  backend: dummy # 'openai' | 'hf' | 'dummy'
+  name: gpt-3.5-turbo
+  temperature: 1.0
+  max_tokens: 512
+  num_candidates_per_step: 3 # n in §3.3
+  beam_size: 3 # k in §3.3 — paper default
+
+# ---------------------------------------------------------------------------
+# Inference — §3.3.
+# ---------------------------------------------------------------------------
+inference:
+  beam_size: 3
+  num_candidates_per_step: 3
+  max_steps: 8 # L — max number of sentences in a CoT chain
+  stop_token: "####" # final-answer marker (Appendix J prompts)
+  full_step: true # if false, single-step inference (Table 4)
+
+# ---------------------------------------------------------------------------
+# Online adaptation — §3.4, Algorithm 1.
+# ---------------------------------------------------------------------------
+online:
+  feedback: combined # 'ground_truth' | 'ai_feedback' | 'combined'
+  candidates_per_question: 3 # M in Algorithm 1
+  ai_feedback_model: gpt-4
+  refresh_candidates_each_iter: true
+  outcome_supervision: true # §4.1 — match final answers as additional positives
+
+# ---------------------------------------------------------------------------
+# Data — Appendix F.1.
+# ---------------------------------------------------------------------------
+data:
+  task: gsm8k # gsm8k | strategyqa | truthfulqa | scienceqa
+  data_dir: ./data/cache
+  num_train_examples: -1 # -1 = all; paper uses full splits
+  num_eval_examples: -1
+  prompt_dir: ./prompts
+
+output:
+  output_dir: /output # where the reproducer reads metrics.json
+  fallback_dir: ./outputs
+  ckpt_name: adapter.pt
+  metrics_name: metrics.json

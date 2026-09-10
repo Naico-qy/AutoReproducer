@@ -1,0 +1,53 @@
+# Super-resolution 64 -> 256 on ImageNet (Section 4.2, Table 3)
+task: superres
+
+data:
+  dataset: imagenet-1k
+  image_size: 256
+  low_res_size: 64
+  num_classes: 1000
+  num_workers: 4
+  trust_remote_code: true
+
+coupling:
+  kind: superres
+  sigma: 0.05 # small Gaussian noise to lift the manifold (§4.2)
+
+interpolant:
+  schedule: linear_no_noise # paper uses γ_t = 0 (Eq. 20)
+
+model:
+  dim: 256
+  dim_mults: [1, 1, 2, 3, 4]
+  resnet_block_groups: 8
+  learned_sinusoidal_cond: true
+  learned_sinusoidal_dim: 32
+  attn_dim_head: 64
+  attn_heads: 4
+  random_fourier_features: false
+  num_classes: 1000
+  apply_inpaint_mask_at_output: false
+
+train:
+  batch_size: 32
+  steps: 200000
+  optimizer: adam
+  lr: 2.0e-4
+  weight_decay: 0.0
+  scheduler: steplr
+  step_size: 1000
+  gamma: 0.99
+  grad_clip: 10000.0
+  ema_decay: 0.9999
+  precision: bf16-mixed
+  log_every: 100
+  ckpt_every: 5000
+  output_dir: runs/superres
+
+eval:
+  num_samples: 100
+  solver: dopri5
+  rtol: 1.0e-5
+  atol: 1.0e-5
+  num_steps_euler: 100
+  output_dir: runs/superres/eval

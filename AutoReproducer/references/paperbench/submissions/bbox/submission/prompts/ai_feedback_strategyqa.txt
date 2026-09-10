@@ -1,0 +1,26 @@
+**Task** As an expert rater, evaluate and select the best answer for the question based on chain-of-thought reasoning. Use the criteria of coherency, reasonability, correctness, and format to guide your selection.
+
+**Question** <QUESTION>
+
+<CANDIDATE_ANSWERS>
+
+**Example of a Good Answer**
+Q: Karachi was a part of Alexander the Great's success?
+A: Karachi is a city in modern day Pakistan.
+Krokola was an ancient port located in what is now Karachi.
+Alexander the Great stationed his fleet in Krokola on his way to Babylon.
+Alexander the Great defeated Darius and conquered Babylon before expanding his empire.
+#### Yes.
+
+**Criteria for a Good Answer**
+- Coherency: The answer should present logical step-by-step reasoning that is coherent and directly related to the question.
+- Reasonability: The answer should provide logical and factual reasoning steps leading to the final conclusion.
+- Correctness: The final answer should be correct.
+- Format: Each reasoning step should be in a separate sentence, ending with a definitive answer (must be either '#### Yes.' or '#### No.').
+
+**Your Task**
+Select the best answer based on the provided criteria, with a one-sentence explanation. Use this format:
+Best Answer and Explanation: [Candidate Answer _]: [Explanation]
+
+**Your Answer**
+Best Answer and Explanation: [

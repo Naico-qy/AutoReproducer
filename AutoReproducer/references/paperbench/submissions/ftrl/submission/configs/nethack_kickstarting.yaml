@@ -1,0 +1,29 @@
+# Fine-tuning + KS on NetHack — the configuration that achieves SOTA 10.5K
+# according to Table 4 / Figure 3a in the paper.
+env: nethack
+character: "mon-hum-neu-mal"
+algo: appo
+total_steps: 500_000_000
+retention: kickstarting # L_KS = E_{s∼π_θ} KL(π* || π_θ)
+ks_loss_coef: 0.5 # App. B.1: "scaled by 0.5"
+ks_decay: 0.99998 # App. B.1: "exponential decay 0.99998 per train step"
+load_pretrained: true
+freeze_encoders: true
+freeze_baseline_pretrain_steps: 500_000_000
+disable_entropy_bonus: true # App. B.1 ("we turn off entropy")
+hidden_dim: 1738
+batch_size: 128
+unroll_length: 32
+discounting: 0.999999
+appo_clip_policy: 0.1
+appo_clip_baseline: 1.0
+adam_learning_rate: 1.0e-4
+weight_decay: 1.0e-4
+adam_eps: 1.0e-7
+grad_norm_clipping: 4
+baseline_cost: 1.0
+entropy_cost: 0.0 # disabled per paper
+reward_clip: 10
+reward_scale: 1.0
+penalty_step: 0.0
+penalty_time: 0.0

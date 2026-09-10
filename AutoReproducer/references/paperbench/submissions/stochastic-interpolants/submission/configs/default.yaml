@@ -1,0 +1,64 @@
+# Default config for "Stochastic Interpolants with Data-Dependent Couplings"
+# All hyperparameters mirror Appendix B of the paper and the addendum.
+
+task: superres # one of: superres | inpainting
+
+# ----- data ---------------------------------------------------------------
+data:
+  dataset: imagenet-1k # downloaded via HuggingFace as per the addendum
+  image_size: 256 # paper trains on ImageNet-256 and ImageNet-512
+  low_res_size: 64 # for super-resolution: 64 -> 256
+  num_classes: 1000
+  num_workers: 4
+  trust_remote_code: true # required by the addendum's example snippet
+
+# ----- coupling (Section 3.2 / 4.1 / 4.2) ---------------------------------
+coupling:
+  kind: superres # superres | inpainting | independent
+  sigma: 0.05 # σ in x_0 = U(D(x_1)) + σ ζ  (§4.2)
+  inpaint_tiles: 64 # 64 spatial tiles for the random mask (§4.1)
+  inpaint_p_mask: 0.3 # each tile masked with p = 0.3 (§4.1)
+
+# ----- interpolant (Definition 3.1, Eq. 20) -------------------------------
+interpolant:
+  schedule: linear_no_noise # α_t = t, β_t = 1-t, γ_t = 0  (Eq. 20 / §4.1)
+  # `linear_with_noise` for α_t = 1-t, β_t = t, γ_t = sqrt(2t(1-t)) (Def. 3.1)
+
+# ----- model architecture (Appendix B) ------------------------------------
+model:
+  dim: 256
+  dim_mults: [1, 1, 2, 3, 4]
+  resnet_block_groups: 8 # = GroupNorm groups, per addendum
+  learned_sinusoidal_cond: true
+  learned_sinusoidal_dim: 32
+  attn_dim_head: 64
+  attn_heads: 4
+  random_fourier_features: false
+  num_classes: 1000 # ImageNet class-conditional embedding
+  apply_inpaint_mask_at_output: true # §4.1: bake mask into b̂
+
+# ----- training (Appendix B + addendum) -----------------------------------
+train:
+  batch_size: 32 # addendum: "All experiments should use a batch size of 32"
+  steps: 200000 # addendum: "All experiments should run for 200,000 gradient steps"
+  optimizer: adam
+  lr: 2.0e-4
+  weight_decay: 0.0
+  scheduler: steplr
+  step_size: 1000
+  gamma: 0.99
+  grad_clip: 10000.0 # Appendix B: clip gradient norm at 10,000
+  ema_decay: 0.9999
+  precision: bf16-mixed
+  log_every: 100
+  ckpt_every: 5000
+  output_dir: runs/default
+
+# ----- evaluation / sampling (Algorithm 2 + Appendix B) -------------------
+eval:
+  num_samples: 100
+  solver: dopri5 # Appendix B uses Dopri solver from torchdiffeq
+  rtol: 1.0e-5
+  atol: 1.0e-5
+  num_steps_euler: 100 # used when solver == 'euler'
+  output_dir: runs/default/eval

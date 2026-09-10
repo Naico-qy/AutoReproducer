@@ -1,0 +1,10 @@
+# SAPG dependencies (PyTorch-based; IsaacGym is OPTIONAL).
+# IsaacGym must be installed separately from NVIDIA's site -- not pip-installable.
+# When IsaacGym is missing, train.py falls back to a DummyVecEnv smoke env.
+
+torch>=2.0.0
+numpy>=1.23.0
+PyYAML>=6.0
+tqdm>=4.65.0
+matplotlib>=3.6.0    # for diversity plots
+scikit-learn>=1.2.0  # PCA fallback / sanity checks

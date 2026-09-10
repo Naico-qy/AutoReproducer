@@ -1,0 +1,85 @@
+# SEMA: Self-Expansion of Pre-trained Models with Mixture of Adapters
+# Default hyperparameters from the paper (Sec. 4.1) and the addendum.
+# Reference: Wang, Lu, Yao, Gong. "Self-Expansion of Pre-trained Models with
+#             Mixture of Adapters for Continual Learning". 2024.
+
+# ----- Backbone -----
+backbone: vit_base_patch16_224 # ViT-B/16 (Dosovitskiy et al., 2021)
+pretrained_weights: imagenet_1k # ViT-B/16-IN1K (Sec. 4.1)
+embed_dim: 768 # ViT-B/16 hidden size
+num_layers: 12 # L = 12 transformer blocks
+freeze_backbone: true # PTM kept frozen (Sec. 3.2)
+
+# ----- Functional Adapter (Sec. 3.3, Eq. 1) -----
+adapter:
+  type:
+    adapter # 'adapter' (Chen et al., 2022 AdaptFormer)
+    # alternatives: 'lora', 'convpass' (Tab. 3)
+  bottleneck: 48 # r = 48 (per addendum)
+  activation: relu # ReLU (Eq. 1)
+
+# ----- Representation Descriptor (Sec. 3.3, Eq. 2) -----
+descriptor:
+  type: ae # autoencoder (Hinton & Salakhutdinov, 2006)
+  latent_dim: 128 # 128 (per addendum)
+  activation: leaky_relu # LeakyReLU (per addendum)
+  leaky_slope: 0.2
+
+# ----- Router (Sec. 3.4) -----
+router:
+  type: linear_softmax # softmax(x . W_mix)
+
+# ----- Self-Expansion (Sec. 3.6) -----
+expansion:
+  enabled_layers:
+    [9, 10, 11] # last 3 transformer blocks (Sec. 4.1)
+    # 0-indexed: layers 10, 11, 12 in 1-indexed
+  z_threshold: 1.0 # z-score threshold (insensitive, Fig. 6)
+  task_oriented: true # one adapter per task per layer (Sec. 3.6)
+  scan_first_epoch: true # scan first epoch to decide expansion
+  multi_layer: true # shallow -> deep order (Sec. 3.6)
+
+# ----- Optimisation (Sec. 4.1) -----
+training:
+  optimizer: sgd # SGD
+  lr_adapter: 0.005 # 5e-3 for adapters/router
+  lr_descriptor: 0.01 # 1e-2 for representation descriptors
+  weight_decay: 0.0
+  momentum: 0.9
+  scheduler: cosine # cosine annealing
+  batch_size: 32 # batch size 32
+  epochs_adapter: 5 # 5 epochs for adapter training
+  epochs_descriptor: 20 # 20 epochs for RD training
+  num_workers: 4
+  device: cuda
+  amp: true # mixed precision (paper uses ViT-B/16; AMP safe)
+
+# ----- Data -----
+data:
+  dataset: cifar100 # cifar100 | imagenet_r | imagenet_a | vtab
+  data_root: ./datasets
+  num_tasks: 10 # 10 tasks for CIFAR-100 (10 classes/task)
+  init_classes: 10 # base task size for CIL
+  increment: 10 # incremental classes per task
+  shuffle_classes: true # default class shuffle (except VTAB)
+  seed: 1993 # standard CL seed (PyCIL convention)
+  vtab_order: # VTAB has fixed order (per addendum)
+    - resisc45
+    - dtd
+    - oxford_iiit_pet
+    - eurosat
+    - oxford_flowers102
+
+# ----- Evaluation -----
+evaluation:
+  metric_avg_inc: true # avg incremental accuracy A_bar
+  metric_last: true # last-step accuracy A_N
+  classifier:
+    prototype # nearest-mean / cosine prototype head
+    # (matches ADAM/SimpleCIL convention, Sec. 4.2)
+
+# ----- Logging -----
+log:
+  output_dir: /output
+  metrics_path: /output/metrics.json
+  log_every: 50

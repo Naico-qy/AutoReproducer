@@ -1,0 +1,25 @@
+# Core deep learning
+torch>=1.13.0
+torchvision>=0.14.0
+numpy>=1.23.0
+scipy>=1.9.0
+scikit-learn>=1.1.0
+Pillow>=9.0.0
+pandas>=1.5.0
+pyyaml>=6.0
+tqdm>=4.64.0
+
+# Vision-language models (paper §A: VLMs accessed via OpenCLIP and CLIP)
+open_clip_torch>=2.20.0
+ftfy>=6.1.0
+regex>=2022.0.0
+
+# Datasets / WordNet (paper §A: WordNet via NLTK; addendum specifies HuggingFace
+# for ImageNet downloads)
+nltk>=3.7
+datasets>=2.14.0
+huggingface_hub>=0.16.0
+
+# Statistics for LCA-on-the-Line correlation experiments (Table 2, Table 3)
+matplotlib>=3.5.0
+seaborn>=0.12.0

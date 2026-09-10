@@ -1,0 +1,155 @@
+# Default config for LCA-on-the-Line reproduction.
+# All hyperparameters mirror Appendix E of Shi et al. (ICML 2024).
+
+experiment:
+  name: lca_on_the_line_default
+  output_dir: /output
+  seed: 42
+
+# -----------------------------------------------------------------------------
+# Datasets (addendum: ImageNet via HuggingFace; OOD variants from official URLs)
+# -----------------------------------------------------------------------------
+data:
+  imagenet_root: ./datasets/imagenet
+  imagenet_v2_root: ./datasets/imagenet_v2_matched_frequency # MatchedFrequency split, commit d626240
+  imagenet_sketch_root: ./datasets/imagenet_sketch
+  imagenet_r_root: ./datasets/imagenet_r
+  imagenet_a_root: ./datasets/imagenet_a
+  objectnet_root: ./datasets/objectnet
+  wordnet_csv: ./resources/imagenet_fiveai.csv # https://github.com/jvlmdr/hiercls
+  num_classes: 1000
+  image_size: 224
+  batch_size: 256
+  num_workers: 4
+
+# -----------------------------------------------------------------------------
+# Models (paper §A: 36 VMs from torchvision, 39 VLMs from CLIP/OpenCLIP)
+# -----------------------------------------------------------------------------
+models:
+  # 36 vision-only models from torchvision (paper §A Table)
+  vms:
+    - alexnet
+    - convnext_tiny
+    - densenet121
+    - densenet161
+    - densenet169
+    - densenet201
+    - efficientnet_b0
+    - googlenet
+    - inception_v3
+    - mnasnet0_5
+    - mnasnet0_75
+    - mnasnet1_0
+    - mnasnet1_3
+    - mobilenet_v3_small
+    - mobilenet_v3_large
+    - regnet_y_1_6gf
+    - wide_resnet101_2
+    - resnet18
+    - resnet34
+    - resnet50
+    - resnet101
+    - resnet152
+    - shufflenet_v2_x2_0
+    - squeezenet1_0
+    - squeezenet1_1
+    - swin_b
+    - vgg11
+    - vgg13
+    - vgg16
+    - vgg19
+    - vgg11_bn
+    - vgg13_bn
+    - vgg16_bn
+    - vgg19_bn
+    - vit_b_32
+    - vit_l_32
+
+  # 39 VLMs (CLIP + OpenCLIP, see paper §A)
+  vlms_clip:
+    - RN50
+    - RN101
+    - RN50x4
+    - ViT-B/32
+    - ViT-B/16
+    - ViT-L/14
+    - ViT-L/14@336px
+  vlms_openclip:
+    - { arch: RN101, pretrained: openai }
+    - { arch: RN101, pretrained: yfcc15m }
+    - { arch: RN101-quickgelu, pretrained: openai }
+    - { arch: RN101-quickgelu, pretrained: yfcc15m }
+    - { arch: RN50, pretrained: cc12m }
+    - { arch: RN50, pretrained: openai }
+    - { arch: RN50, pretrained: yfcc15m }
+    - { arch: RN50-quickgelu, pretrained: cc12m }
+    - { arch: RN50-quickgelu, pretrained: openai }
+    - { arch: RN50-quickgelu, pretrained: yfcc15m }
+    - { arch: RN50x16, pretrained: openai }
+    - { arch: RN50x4, pretrained: openai }
+    - { arch: RN50x64, pretrained: openai }
+    - { arch: ViT-B-16, pretrained: laion2b_s34b_b88k }
+    - { arch: ViT-B-16, pretrained: laion400m_e31 }
+    - { arch: ViT-B-16, pretrained: laion400m_e32 }
+    - { arch: ViT-B-16-plus-240, pretrained: laion400m_e31 }
+    - { arch: ViT-B-16-plus-240, pretrained: laion400m_e32 }
+    - { arch: ViT-B-32, pretrained: laion2b_e16 }
+    - { arch: ViT-B-32, pretrained: laion2b_s34b_b79k }
+    - { arch: ViT-B-32, pretrained: laion400m_e31 }
+    - { arch: ViT-B-32, pretrained: laion400m_e32 }
+    - { arch: ViT-B-32, pretrained: openai }
+    - { arch: ViT-B-32-quickgelu, pretrained: laion400m_e31 }
+    - { arch: ViT-B-32-quickgelu, pretrained: laion400m_e32 }
+    - { arch: ViT-L-14, pretrained: laion2b_s32b_b82k }
+    - { arch: ViT-L-14, pretrained: laion400m_e31 }
+    - { arch: ViT-L-14, pretrained: laion400m_e32 }
+    - { arch: coca_ViT-B-32, pretrained: laion2b_s13b_b90k }
+    - { arch: coca_ViT-L-14, pretrained: laion2b_s13b_b90k }
+
+# -----------------------------------------------------------------------------
+# LCA distance computation (paper §2 + §D, addendum: information content)
+# -----------------------------------------------------------------------------
+lca:
+  hierarchy_source: wordnet # {wordnet, kmeans}
+  score_function: information # {depth, information}; addendum requires I(y) = -log p(y)
+  kmeans_levels: 9 # 2^9 < 1000 (paper Appendix E.1)
+
+# -----------------------------------------------------------------------------
+# Linear probing with LCA soft loss (paper §4.3.2, Appendix E.2 + E.5)
+# -----------------------------------------------------------------------------
+linear_probe:
+  feature_layer: penultimate # addendum: M(X) is the last hidden layer before FC
+  optimizer: adamw # paper Appendix E.5
+  learning_rate: 0.001 # paper Appendix E.5
+  weight_decay: 0.05
+  scheduler: cosine_with_warmup # paper Appendix E.5
+  warmup_type: linear
+  warmup_lr: 1.0e-5
+  epochs: 50 # paper Appendix E.5
+  batch_size: 1024 # paper Appendix E.5
+  amp: true # mixed-precision standard for ICML 2024
+
+  # LCA soft loss (Algorithm 1 in Appendix E.2)
+  lca_loss:
+    enabled: true
+    lambda_weight: 0.03 # paper Appendix E.2: lambda = 0.03
+    temperature: 25.0 # paper Appendix E.2: T = 25
+    alignment_mode: CE # paper Appendix E.2: CE soft loss is default
+    weight_interpolation_alpha: 0.5 # for W_interp = alpha*W_ce + (1-alpha)*W_ce+soft
+
+# -----------------------------------------------------------------------------
+# Correlation / prediction experiments (Tables 2, 3)
+# -----------------------------------------------------------------------------
+correlation:
+  metrics: [r2, pearson, kendall, spearman]
+  ood_datasets:
+    [imagenet_v2, imagenet_sketch, imagenet_r, imagenet_a, objectnet]
+  baselines: [id_top1, ac, aline_d, aline_s, id_lca] # Table 3 baselines
+  scaler: minmax # paper §4.2: min-max scaling instead of probit
+
+# Smoke-test config used by reproduce.sh.
+smoke_test:
+  enabled: true
+  num_models: 4 # ResNet18, ResNet50, CLIP_RN50, CLIP_RN50x4 (Table 1)
+  num_eval_samples: 256 # Tiny eval to keep runtime <24h
+  linear_probe_epochs: 1

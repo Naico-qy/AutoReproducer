@@ -1,0 +1,12 @@
+# RICE reproduction dependencies
+# Aligned with Stable-Baselines3 defaults (see addendum: "MlpPolicy defaults")
+torch>=2.0.0
+numpy>=1.23.0
+gymnasium[mujoco]>=0.29.0
+stable-baselines3>=2.2.0
+sb3-contrib>=2.2.0
+pyyaml>=6.0
+tqdm>=4.65.0
+tensorboard>=2.14.0
+cloudpickle>=2.2.0
+mujoco>=2.3.0

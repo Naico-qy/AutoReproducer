@@ -1,0 +1,28 @@
+# Fine-tuning + BC on RoboticSequence (Meta-World, §3 / App. B.3 / Table 3).
+env: robotic_sequence
+algo: sac
+total_steps: 4_000_000
+retention: behavioral_cloning
+bc_actor_coef: 1.0 # Table 3
+bc_critic_coef: 0.0 # do not regularize critic (App. C.5)
+bc_buffer_size: 10000 # Table 3 ("memory: 10000")
+load_pretrained: true
+pretrained_stages: ["peg-unplug-side", "push-wall"] # FAR
+sequence:
+  - hammer # CLOSE
+  - push # CLOSE
+  - peg-unplug-side # FAR
+  - push-wall # FAR
+hidden_layers: 4
+hidden_dim: 256
+activation: leaky_relu
+layer_norm_first_layer: true
+learning_rate: 1.0e-3
+batch_size: 128
+buffer_size: 100000
+gamma: 0.99
+tau: 0.005
+auto_entropy: true
+beta_terminal_bonus: 1.5
+episode_length: 200
+log_likelihood_every_steps: 50000 # Addendum: every 50k steps

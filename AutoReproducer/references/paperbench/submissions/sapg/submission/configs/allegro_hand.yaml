@@ -1,0 +1,64 @@
+# =============================================================================
+# SAPG config for AllegroHand reorientation (paper App. B.3, Table 4)
+# =============================================================================
+
+experiment:
+  name: sapg_allegro_hand
+  task: AllegroHand
+  seed: 42
+  device: cuda
+  log_dir: ./runs
+  num_iterations: 10000
+  smoke: false
+
+env:
+  num_envs: 24576
+  num_policies: 6
+  obs_dim: 88
+  action_dim: 16
+  max_episode_length: 600
+  action_clip: 1.0
+
+model:
+  recurrent: false
+  obs_mlp_hidden: [512, 256, 128] # paper App. B.3
+  lstm_hidden: 0
+  lstm_layers: 0
+  lstm_seq_len: 0
+  phi_dim: 16
+  activation: elu
+  init_log_std: 0.0
+  separate_sigma_per_policy: true
+
+ppo:
+  gamma: 0.99
+  tau: 0.95
+  learning_rate: 5.0e-4
+  kl_threshold: 0.016
+  grad_norm: 1.0
+  entropy_coef: 0.0
+  clip_eps: 0.2 # NOTE: Allegro Hand uses 0.2 (Table 4)
+  mini_batch_size_factor: 4
+  critic_coef: 4.0
+  horizon_length: 8
+  bounds_loss_coef: 0.0001
+  mini_epochs: 5
+  n_step_return: 3
+  normalize_advantage: true
+
+sapg:
+  variant: leader_follower
+  off_policy_lambda: 1.0
+  subsample_off_policy: true
+  entropy_diversity_sigma: 0.0
+  share_backbone: true
+
+eval:
+  num_episodes: 50
+  deterministic: true
+  metric: episode_reward
+
+logging:
+  log_interval: 10
+  save_interval: 500
+  metrics_path: /output/metrics.json

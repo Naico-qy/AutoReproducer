@@ -1,0 +1,17 @@
+# DDPM, FFHQ -> 10-shot Sunglasses  (addendum table)
+extends: default.yaml
+framework: ddpm
+adaptor:
+  c: 8
+  d: 8
+similarity:
+  gamma: 15.0
+adversarial:
+  J: 10
+  omega: 0.02
+train:
+  lr: 5.0e-5
+  iterations: 200
+data:
+  source: ffhq
+  target: sunglasses

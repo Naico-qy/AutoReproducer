@@ -1,0 +1,88 @@
+# Default config for CompoNet experiments.
+# Hyperparameters from Tables E.1 and E.2 of the paper.
+
+# ---------------------------------------------------------------------------
+# Run-level settings
+# ---------------------------------------------------------------------------
+sequence: metaworld # one of: metaworld, spaceinvaders, freeway
+method: componet # one of: baseline, ft1, ftn, prognet, packnet, componet
+seed: 0
+device: cuda # set to cpu if no GPU
+budget_per_task: 1000000 # Delta = 1M steps per task (Section 5.2)
+log_interval: 1000
+eval_interval: 50000
+output_dir: /output # PaperBench reads metrics from here
+
+# ---------------------------------------------------------------------------
+# Architecture (CompoNet)
+# Section 4.1, 4.2, Tables E.1, E.2
+# ---------------------------------------------------------------------------
+componet:
+  d_model: 256 # Hidden vector size (Table E.1 / E.2)
+  internal_layers: 2 # Internal-policy MLP depth
+  max_modules: 1024
+  activation: relu
+
+# ---------------------------------------------------------------------------
+# Meta-World specific (Table E.1; SAC)
+# ---------------------------------------------------------------------------
+metaworld:
+  d_enc: 39 # state dim (Section 5.2 / Appendix D.1)
+  n_actions: 4 # 4-D real-valued actions in [-1, 1]
+  num_critic_layers: 3
+  num_actor_layers: 2
+  algorithm: sac
+  sac:
+    gamma: 0.99
+    tau: 0.005
+    alpha: 0.2
+    autotune_alpha: true
+    actor_lr: 1.0e-3
+    critic_lr: 1.0e-3
+    batch_size: 128
+    buffer_size: 1000000
+    policy_update_freq: 2
+    target_update_freq: 1
+    learning_starts: 5000
+    random_actions: 10000
+    log_std_min: -20.0
+    log_std_max: 2.0
+    noise_clip: 0.5
+
+# ---------------------------------------------------------------------------
+# ALE specific (Table E.2; PPO)
+# ---------------------------------------------------------------------------
+ale:
+  d_enc: 512 # CNN output dim (Appendix E.1)
+  encoder:
+    type: cnn_atari
+    in_channels: 4 # frame stack
+    image_size: 84
+    channels: [32, 64, 64]
+    kernel_sizes: [8, 4, 3]
+    strides: [4, 2, 1]
+    fc_dim: 512
+  algorithm: ppo
+  ppo:
+    learning_rate: 2.5e-4
+    anneal_lr: true
+    gamma: 0.99
+    gae_lambda: 0.95
+    num_envs: 8
+    num_steps: 128
+    batch_size: 1024 # 8 envs * 128 steps
+    minibatch_size: 256
+    num_minibatches: 4
+    update_epochs: 4
+    clip_coef: 0.2
+    value_coef: 0.5
+    entropy_coef: 0.01
+    max_grad_norm: 0.5
+    norm_adv: true
+    clip_vloss: true
+
+# ---------------------------------------------------------------------------
+# PackNet specific (Appendix E.2)
+# ---------------------------------------------------------------------------
+packnet:
+  retrain_fraction: 0.20 # 20% of timestep budget for retraining

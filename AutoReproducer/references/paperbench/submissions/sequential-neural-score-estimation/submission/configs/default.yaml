@@ -1,0 +1,44 @@
+# Default config for (T)SNPSE — Sharrock et al., ICML 2024.
+# Hyperparameters drawn from the paper (Section 5.1 and Appendix E.3).
+
+# ---- Task / experiment ----------------------------------------------------
+task:
+  two_moons # one of: gaussian_linear, gaussian_linear_uniform,
+  #          slcp, slcp_distractors, bernoulli_glm,
+  #          bernoulli_glm_raw, gaussian_mixture,
+  #          two_moons, sir, lotka_volterra
+method: tsnpse # "npse" (amortised) | "tsnpse" (sequential, paper Alg. 1)
+sde: ve # "ve" (recommended low-d) | "vp" (recommended high-d)
+observation_idx: 1 # canonical sbibm observation index 1..10
+
+# ---- Simulation budget (paper Section 5.2: {1000, 10000, 100000}) ---------
+simulation_budget: 1000
+n_rounds: 10 # R = 10 for sequential experiments (Appendix E.3.3)
+
+# ---- Optimisation (Appendix E.3.2) ---------------------------------------
+max_iters_per_round: 3000
+early_stop_patience: 1000
+val_fraction: 0.15
+batch_size: null # auto: 50 (non-seq) / 200 (seq, M<=10000) / 500 (M=100000)
+learning_rate: 1.0e-4
+
+# ---- VE SDE (Appendix E.3.1) --------------------------------------------
+sigma_min: 0.01 # 0.01 for 2-D (SIR, Two Moons), 0.05 otherwise
+sigma_max:
+  null # auto via Technique 1 of Song & Ermon (2020)
+  # (paper addendum: sequential methods use ROUND-1
+  #  data only when computing sigma_max).
+
+# ---- VP SDE (Appendix E.3.1) --------------------------------------------
+beta_min: 0.1
+beta_max: 11.0
+
+# ---- TSNPSE truncation (Appendix E.3.3) ---------------------------------
+epsilon_hpr: 5.0e-4 # quantile cut-off for HPR_eps
+n_posterior_samples: 20000 # # samples used to estimate kappa each round
+
+# ---- I/O ----------------------------------------------------------------
+seed: 1
+output_dir: outputs
+save_checkpoint: true
+log_every: 200

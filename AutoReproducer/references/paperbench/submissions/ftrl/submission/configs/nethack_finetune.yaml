@@ -1,0 +1,26 @@
+# Vanilla fine-tuning on NetHack (Human Monk role).
+# §3 / App. B.1 — used as the negative baseline.
+env: nethack
+character: "mon-hum-neu-mal" # Human Monk
+algo: appo
+total_steps: 500_000_000
+retention: none # vanilla fine-tuning
+load_pretrained: true # initialise with Tuyls et al. (2023) checkpoint
+freeze_encoders: true # App. B.1 ("we froze the encoders")
+freeze_baseline_pretrain_steps: 500_000_000 # 500M-step critic warmup
+hidden_dim: 1738
+batch_size: 128
+unroll_length: 32
+discounting: 0.999999
+appo_clip_policy: 0.1
+appo_clip_baseline: 1.0
+adam_learning_rate: 1.0e-4
+weight_decay: 1.0e-4
+adam_eps: 1.0e-7
+grad_norm_clipping: 4
+baseline_cost: 1.0
+entropy_cost: 0.001
+reward_clip: 10
+reward_scale: 1.0
+penalty_step: 0.0
+penalty_time: 0.0

@@ -1,0 +1,87 @@
+# =============================================================================
+# Default hyperparameters for FRE
+# (Frans, Park, Abbeel, Levine. ICML 2024. arXiv:2402.17135)
+#
+# Numbers in this file are taken VERBATIM from Appendix A, Table 3 of the
+# paper, with corrections applied per the addendum:
+#   - Reward Embedding Dim should be 64 (not 128); state embedding is 64;
+#     concatenated input token to the transformer is 128-dim.
+#   - z (latent) is 128-dim.
+#   - Encoder Layers refers to the MLP block dim inside the transformer
+#     (residual/attention activations are 128-dim, MLP expands to 256).
+# =============================================================================
+
+# ---- Domain selection -------------------------------------------------------
+# One of: antmaze, exorl-walker, exorl-cheetah, kitchen.
+domain: antmaze
+dataset: antmaze-large-diverse-v2
+
+# ---- FRE-* prior reward distribution ---------------------------------------
+# Uniform mixture of three random reward families (Section 4.2 / addendum).
+# Use one of: fre-all, fre-goals, fre-lin, fre-mlp,
+#             fre-lin-mlp, fre-goal-mlp, fre-goal-lin, fre-hint.
+prior: fre-all
+ratio_goal: 0.33
+ratio_lin: 0.33
+ratio_mlp: 0.33
+
+# ---- Optimization (Table 3) ------------------------------------------------
+batch_size: 512
+encoder_steps: 150000 # 1,000,000 for ExORL/Kitchen domains
+policy_steps: 850000 # 1,000,000 for ExORL/Kitchen domains
+optimizer: adam # Adam (paper); AdamW also acceptable
+lr: 0.0001
+seed: 0
+device: cuda # falls back to cpu if cuda unavailable
+
+# ---- FRE encoder/decoder (Table 3 + addendum) ------------------------------
+K_encode: 32 # "Reward Pairs to Encode"
+K_decode: 8 # "Reward Pairs to Decode"
+n_reward_bins: 32 # discretization buckets
+state_embed_dim: 64 # addendum correction
+reward_embed_dim: 64 # addendum correction
+token_dim: 128 # = state_embed + reward_embed
+z_dim: 128 # latent
+encoder_layers: [256, 256, 256, 256] # MLP-block hidden dims per transformer layer
+encoder_attn_heads: 4
+decoder_layers: [512, 512, 512]
+beta_kl: 0.01
+
+# ---- IQL policy (Table 3) --------------------------------------------------
+rl_layers: [512, 512, 512]
+target_update_rate: 0.001 # tau
+discount: 0.88 # gamma
+awr_temperature: 3.0
+iql_expectile: 0.8 # tau in IQL paper
+
+# ---- Goal sampling (HER -- Park et al. 2023a / Andrychowicz et al. 2017) ---
+# Used for both FRE-goals and the GC-IQL/GC-BC baselines.
+p_random_goal: 0.3
+p_geometric_goal: 0.5
+p_current_goal: 0.2
+goal_threshold_antmaze: 2.0
+goal_threshold_exorl: 0.1
+
+# ---- AntMaze-specific preprocessing (App. C.1) -----------------------------
+antmaze_xy_bins: 32
+antmaze_max_steps: 2000
+
+# ---- ExORL-specific (App. C.2 + addendum) ----------------------------------
+exorl_dataset: rnd # addendum: "training is done on the RND dataset"
+exorl_max_steps: 1000
+
+# ---- Kitchen ---------------------------------------------------------------
+kitchen_subtasks:
+  - microwave
+  - kettle
+  - bottom burner
+  - top burner
+  - light switch
+  - slide cabinet
+  - hinge cabinet
+
+# ---- Evaluation ------------------------------------------------------------
+eval_episodes: 20 # 20 rollouts per task, 5 seeds (Table 1 footnote)
+log_every: 1000
+checkpoint_every: 50000
+output_dir: /output

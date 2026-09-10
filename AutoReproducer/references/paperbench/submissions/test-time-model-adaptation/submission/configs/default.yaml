@@ -1,0 +1,71 @@
+# Default hyperparameters for FOA, drawn from Section 4 ("Implementation
+# Details") of Niu et al., "Test-Time Model Adaptation with Only Forward
+# Passes", ICML 2024.
+
+model:
+  name: vit_base_patch16_224 # ViT-Base, 12 layers, 768-dim, 224x224
+  pretrained: true # ImageNet-1K weights via timm
+  num_prompts: 3 # N_p = 3 (paper Section 4)
+
+foa:
+  popsize: 28 # K = 28 = 4 + 3*log(prompt_dim) (Hansen 2016)
+  lambda_disc: 0.4 # lambda * BS/64 = 0.4 on ImageNet-C/V2/Sketch
+  lambda_disc_imagenet_r: 0.2 # lambda * BS/64 = 0.2 on ImageNet-R
+  activation_shift: true # Section 3.2 enabled by default
+  gamma: 1.0 # step size in Eqn. (7)
+  alpha: 0.1 # EMA factor in Eqn. (9)
+  cma_sigma0: 1.0 # initial step size tau^(0) = 1
+  seed: 2024
+
+source_stats:
+  num_samples: 32 # Q = 32 ID samples (Figure 2(c))
+  source_split: imagenet_val
+
+evaluation:
+  dataset: imagenet_c # one of imagenet_c/r/v2/sketch
+  batch_size: 64 # paper default, matches TENT/SAR
+  severity: 5 # ImageNet-C severity 5 (Tables 2, 4)
+  num_workers: 4
+  # In smoke runs we cap samples per corruption to keep runtime low.
+  max_samples_per_corruption: 5000
+  # Subset of corruptions to evaluate (smoke = first 3; full = all 15)
+  corruptions:
+    - gaussian_noise
+    - shot_noise
+    - impulse_noise
+    - defocus_blur
+    - glass_blur
+    - motion_blur
+    - zoom_blur
+    - snow
+    - frost
+    - fog
+    - brightness
+    - contrast
+    - elastic_transform
+    - pixelate
+    - jpeg_compression
+
+paths:
+  imagenet_c_root: /data/imagenet-c # override at runtime
+  imagenet_r_root: /data/imagenet-r
+  imagenet_v2_root: /data/imagenet-v2
+  imagenet_sketch_root: /data/imagenet-sketch
+  output_dir: /output
+
+# For FOA-I (Table 6): single-sample adaptation with interval updates.
+foa_interval:
+  enabled: false
+  interval: 4 # I in {4,8,16,32,64} (paper Table 6)
+  variant: v1 # v1 stores features, v2 stores images
+
+# Quantization hooks (paper Section 4.2 + addendum: PTQ4ViT)
+quantization:
+  enabled: false
+  bits: 8 # 8 or 6 (paper Table 4)
+  method: ptq4vit # placeholder; see references
+
+baselines:
+  run: false # set true to also run TENT, T3A, NoAdapt
+  tent_lr: 1.0e-3 # TENT default learning rate
+  t3a_M: 100 # support-set size per class

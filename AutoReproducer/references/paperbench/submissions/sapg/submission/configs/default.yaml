@@ -1,0 +1,95 @@
+# =============================================================================
+# SAPG: Split and Aggregate Policy Gradients (Singla, Agarwal, Pathak 2024)
+# Default config -- AllegroKuka tasks (paper Table 2, App. B.1)
+# =============================================================================
+
+experiment:
+  name: sapg_allegro_kuka_regrasping
+  task:
+    AllegroKukaRegrasping # one of: AllegroKukaRegrasping, AllegroKukaThrow,
+    #         AllegroKukaReorientation,
+    #         ShadowHand, AllegroHand
+  seed: 42
+  device: cuda
+  log_dir: ./runs
+  num_iterations: 10000 # paper trains ~ 2e10 transitions; smoke runs use 50
+  smoke: false # if true: tiny env count + few iters for CI
+
+# -----------------------------------------------------------------------------
+# Parallel environments (Sec. 5: 24576 envs split between M=6 policies)
+# -----------------------------------------------------------------------------
+env:
+  num_envs: 24576
+  num_policies: 6 # M in the paper. Each policy gets N/M = 4096 envs.
+  obs_dim: 80 # placeholder; real value depends on IsaacGym task
+  action_dim: 23 # AllegroKuka: 7 (Kuka) + 16 (Allegro) DoF
+  max_episode_length: 600
+  action_clip: 1.0
+
+# -----------------------------------------------------------------------------
+# Policy / value architecture (App. B.1)
+# -----------------------------------------------------------------------------
+model:
+  recurrent: true # AllegroKuka uses LSTM, ShadowHand/AllegroHand use MLP
+  obs_mlp_hidden: [768, 512, 256] # ELU activation
+  lstm_hidden: 768
+  lstm_layers: 1
+  lstm_seq_len: 16
+  phi_dim:
+    32 # latent conditioning for AllegroKuka (Sec 4.4)
+    # use 16 for ShadowHand/AllegroHand
+  activation: elu
+  init_log_std: 0.0
+  separate_sigma_per_policy:
+    true # App. B Note: "each block has its own learnable
+    #   vector sigma" so policies can diverge in entropy
+
+# -----------------------------------------------------------------------------
+# PPO hyperparameters (Table 2 of paper)
+# -----------------------------------------------------------------------------
+ppo:
+  gamma: 0.99
+  tau: 0.95 # GAE lambda
+  learning_rate: 1.0e-4
+  kl_threshold: 0.016
+  grad_norm: 1.0
+  entropy_coef: 0.0 # base entropy coef -- followers use sigma*(j-1) on top
+  clip_eps: 0.1
+  mini_batch_size_factor: 4 # paper says: num_envs * 4
+  critic_coef: 4.0 # paper's lambda'
+  horizon_length: 16
+  bounds_loss_coef: 0.0001
+  mini_epochs: 2
+  n_step_return: 3 # for on-policy critic target (Eq. 5)
+  normalize_advantage: true
+
+# -----------------------------------------------------------------------------
+# SAPG-specific (Sec 4)
+# -----------------------------------------------------------------------------
+sapg:
+  variant: leader_follower # one of: leader_follower, symmetric, no_off_policy
+  off_policy_lambda: 1.0 # lambda in Eq. 4
+  subsample_off_policy:
+    true # match off-policy and on-policy minibatch sizes
+    # (Sec 4.3 -- prevents off-policy noise drowning gradient)
+  entropy_diversity_sigma:
+    0.0 # sigma for follower entropy bonus (Sec 4.5)
+    # paper sweeps {0, 0.003, 0.005}
+    # Reorientation works best with 0.005
+  share_backbone: true # B_theta + C_psi shared across policies (Sec 4.4)
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+eval:
+  num_episodes: 50
+  deterministic: true
+  metric: successes # for AllegroKuka tasks; "episode_reward" for hand tasks
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  log_interval: 10
+  save_interval: 500
+  metrics_path: /output/metrics.json

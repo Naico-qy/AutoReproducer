@@ -1,0 +1,19 @@
+Use the step-by-step method as shown in the examples to answer the question. Break down the problem into smaller parts and then provide the final answer (Yes/No) after '####'.
+
+Example 1:
+Q: Karachi was a part of Alexander the Great's success?
+A: Karachi is a city in modern day Pakistan.
+Krokola was an ancient port located in what is now Karachi.
+Alexander the Great stationed his fleet in Krokola on his way to Babylon.
+Alexander the Great defeated Darius and conquered Babylon before expanding his empire.
+#### Yes.
+
+Example 2:
+Q: Was P. G. Wodehouse's favorite book The Hunger Games?
+A: P. G. Wodehouse died in 1975.
+The Hunger Games was published in 2008.
+#### No.
+
+Your Question:
+Q: <QUESTION>
+A:

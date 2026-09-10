@@ -1,0 +1,34 @@
+{
+  "n_papers_graded": 23,
+  "average_score": 0.6605477419400212,
+  "per_paper": {
+    "bbox": 0.4034188034188034,
+    "mechanistic-understanding": 0.701851851851852,
+    "bridging-data-gaps": 0.5714285714285714,
+    "sample-specific-masks": 0.8652053413958176,
+    "all-in-one": 0.5395833333333333,
+    "stay-on-topic-with-classifier-free-guidance": 0.8815806878306879,
+    "sequential-neural-score-estimation": 0.8931623931623931,
+    "self-composing-policies": 0.6503432539682541,
+    "lbcs": 0.8573957300572946,
+    "sapg": 0.4648533950617284,
+    "adaptive-pruning": 0.5059253780407627,
+    "fre": 0.6150879984213318,
+    "stochastic-interpolants": 0.829933110367893,
+    "test-time-model-adaptation": 0.7006481481481481,
+    "what-will-my-model-forget": 0.6098182075860649,
+    "ftrl": 0.6266354016354015,
+    "robust-clip": 0.5254629629629629,
+    "bam": 0.8471998089359202,
+    "pinn": 0.5428571428571429,
+    "rice": 0.5764659197012137,
+    "lca-on-the-line": 0.6315580847723704,
+    "semantic-self-consistency": 0.9544642857142858,
+    "self-expansion": 0.397718253968254
+  },
+  "baselines": {
+    "IterativeAgent o1-high (36h)": 0.434,
+    "BasicAgent claude-3.5-sonnet": 0.21,
+    "BasicAgent gpt-4o": 0.041
+  }
+}

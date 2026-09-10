@@ -1,0 +1,21 @@
+# Core RL and DL stack
+torch>=2.0
+numpy>=1.23
+PyYAML>=6.0
+tqdm>=4.65
+gymnasium>=0.29
+
+# Atari (Montezuma's Revenge)
+ale-py>=0.8
+opencv-python-headless>=4.8
+
+# Meta-World (RoboticSequence base environments)
+# pip will pull metaworld directly from the upstream repo when available
+# metaworld @ git+https://github.com/Farama-Foundation/Metaworld.git
+
+# NetHack Learning Environment + dataset (Addendum-pinned dependencies)
+# nle @ git+https://github.com/facebookresearch/nle.git@main
+# sample-factory>=2.0   # APPO implementation referenced by the paper
+
+# Optional: tensorboard for logging
+tensorboard>=2.13

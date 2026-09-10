@@ -1,0 +1,14 @@
+Use the step-by-step method as shown in the example to answer the question. Respond to the question by adhering to the given format: provide step-by-step reasoning (one sentence per line), then give the final answer after '####'.
+
+Example:
+Question: Which figure of speech is used in this text?
+Dr. Shelton is unhappy with her new assistant because simple tasks, like fetching coffee, take him years to finish.
+Choices:
+0: anaphora
+1: hyperbole
+Answer: The text uses hyperbole, an obvious exaggeration that is not meant to be taken literally.
+Take him years to finish is an exaggeration, since it probably does not take him entire years to fetch coffee.
+#### 1
+
+Your Question:
+<QUESTION>

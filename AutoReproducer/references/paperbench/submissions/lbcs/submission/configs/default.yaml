@@ -1,0 +1,59 @@
+# Default hyperparameters for LBCS (Lexicographic Bilevel Coreset Selection)
+# Source: Xia et al., "Refined Coreset Selection: Towards Minimal Coreset Size
+# under Model Performance Constraints", ICML 2024.
+# Sections: §5.1 (Table 1), §5.2 (Table 2/3), Appendix A (Algorithm 2),
+# Appendix D.2 (Table 7 network structures).
+
+experiment:
+  name: lbcs_default
+  seed: 0
+  output_dir: /output
+  num_repeats: 1 # paper repeats 10x; we leave 1 for smoke runs
+
+dataset:
+  # one of: fmnist, svhn, cifar10, mnist_s
+  name: fmnist
+  data_root: ./data_root
+  download: true
+  num_classes: 10
+
+  # imperfect supervision options (§5.3)
+  noise_rate: 0.0 # symmetric label noise rate, e.g. 0.3 or 0.5
+  imbalance_ratio: 0.0 # exponential class imbalance ratio (e.g. 0.01)
+
+# Inner loop: train proxy network on coreset (Step 3 of Alg. 1)
+inner:
+  # proxy / trained-on-coreset network architectures (Appendix D.2)
+  proxy_arch: lenet # lenet for F-MNIST, convnet_svhn for SVHN, convnet_cifar for CIFAR-10
+  optimizer: adam
+  lr: 0.001
+  weight_decay: 0.0
+  epochs: 100 # epochs per inner-loop training (paper: 100 for F-MNIST/SVHN)
+  batch_size: 128
+  warmup_epochs: 5 # short warmup before fine-tuning with each new mask (Section 3.2 acceleration trick)
+
+# Outer loop: lexicographic optimization over the masks (Algorithm 2)
+outer:
+  T: 500 # number of outer-loop search iterations (paper §5.2 default)
+  epsilon: 0.2 # voluntary performance compromise of f1 (paper §5.2 default)
+  delta_init: 0.5 # initial step size in LexiFlow
+  delta_lower: 1e-3 # lower bound for delta before random restart
+  group_size: 1 # examples per group; >1 narrows search space (Sec 3.2 trick / ImageNet)
+  inner_epochs: 1 # epochs of fine-tune to evaluate a candidate mask (acceleration)
+
+# Coreset training (§5.2): retrain a fresh model on the final coreset
+coreset_train:
+  k: 1000 # predefined coreset size (Table 2 entries: 1000/2000/3000/4000)
+  target_arch: lenet # final / target network — lenet for F-MNIST, convnet for SVHN, resnet18 for CIFAR-10
+  optimizer: adam # adam for F-MNIST/SVHN; sgd-cosine for CIFAR-10
+  lr: 0.001
+  momentum: 0.9
+  weight_decay: 5e-4
+  epochs: 100 # F-MNIST/SVHN: 100; CIFAR-10: 200
+  batch_size: 128
+  scheduler: none # 'cosine' for CIFAR-10 ResNet-18
+
+# Logging
+log:
+  interval: 10
+  save_mask: true

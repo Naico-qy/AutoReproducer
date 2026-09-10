@@ -1,0 +1,98 @@
+# =============================================================================
+# Default config for APT (Adaptive Pruning and Tuning).
+# Hyperparameters are sourced directly from:
+#   * Zhao, Hajishirzi & Cao, "APT: Adaptive Pruning and Tuning Pretrained
+#     Language Models for Efficient Training and Inference", ICML 2024.
+#   * The author-provided addendum.md
+# =============================================================================
+
+# ---- Model -----------------------------------------------------------------
+model:
+  name: "roberta-base" # encoder backbone (paper §5.1)
+  num_labels: 2 # SST-2 by default
+  task_type: "classification" # one of {classification, qa, seq2seq}
+
+# ---- Task / data -----------------------------------------------------------
+data:
+  task_name: "sst2" # sst2 | mnli | squad_v2 | cnn_dm
+  max_seq_length: 128 # 128 for GLUE, 384 for SQuAD, 512/142 for CNN/DM
+  cache_dir: "./.cache"
+  train_batch_size: 32
+  eval_batch_size: 64
+  num_workers: 4
+
+# ---- APT adapter (Section 4.1) --------------------------------------------
+adapter:
+  init_rank: 8 # initial r_apt
+  max_rank: 32 # cap during dynamic rank growth (§4.3)
+  lora_alpha: 16 # scaling s = lora_alpha / r_apt
+  lora_dropout: 0.1
+  apply_to: # where adapters are inserted
+    attention_q: true
+    attention_v: true
+    ffn_up: true # FFN adapters used for RoBERTa/T5 (§4.1)
+    ffn_down: true
+
+# ---- Adaptive pruning (Section 4.2) ---------------------------------------
+pruning:
+  enable: true
+  target_sparsity: 0.60 # γ_T - main RoBERTa setting (Table 2)
+  pruning_start_step: 200 # t_b: when to begin gradually pruning
+  pruning_end_step: 2000 # t_e: when target sparsity is reached
+  cubic_schedule: true # γ_t follows cubic schedule (Zhu & Gupta '17)
+  ema_decay: 0.85 # addendum: S_bar(t) = 0.85 S_bar(t-1) + 0.15 S_hat
+  use_kurtosis: true # outlier-aware (§4.2)
+  prune_components: # what to prune
+    mha_heads: true # attention heads
+    ffn_neurons: true # FFN intermediate neurons
+    hidden_dim: true # transformer hidden dim
+  search:
+    method: "binary" # binary search over latency-saliency knapsack
+    max_iters: 64
+
+# ---- Adaptive tuning (Section 4.3) ----------------------------------------
+tuning:
+  enable: true
+  rank_growth_steps: [500, 1000, 1500] # steps at which we increase Δ_t
+  rank_budget_schedule: # Δ_t (relative to init) per stage
+    - 1.0
+    - 1.5
+    - 2.0
+    - 2.5
+  topk_fraction: 0.5 # add new params to top-half salient adapters
+
+# ---- Self-distillation (Section 4.4 + addendum) ---------------------------
+distillation:
+  enable: true
+  temperature: 4.0 # τ in eq. 7 (addendum)
+  layer_loss_weight: 0.9 # 0.9 * L_layer (addendum)
+  pred_loss_weight_classification: 1.0 # L_distill = L_pred + 0.9 L_layer (GLUE)
+  pred_loss_weight_generation: 0.1 # 0.1 L_pred + 0.9 L_layer (SQuAD/CNN-DM)
+  layer_sample_strategy: "block_random" # Haidar et al., 2022
+  num_teacher_layers: 4 # |T|
+  remap_every_step: true # addendum: layer-mapping recomputed per step
+  mu_schedule: "linear" # μ goes 0 -> 1 over pruning window
+
+# ---- Optimization ----------------------------------------------------------
+optim:
+  name: "adamw"
+  lr_adapter: 5.0e-4 # LoRA-style fine-tune lr
+  lr_classifier: 1.0e-4
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  scheduler: "linear_warmup"
+  warmup_steps: 100
+  max_steps: 6000
+  grad_clip: 1.0
+  gradient_accumulation: 1
+  fp16: false
+  bf16: false # set true if Ampere+ available
+
+# ---- Reproducibility / IO --------------------------------------------------
+runtime:
+  seed: 42
+  output_dir: "/output"
+  log_every: 50
+  save_every: 1000
+  eval_every: 500

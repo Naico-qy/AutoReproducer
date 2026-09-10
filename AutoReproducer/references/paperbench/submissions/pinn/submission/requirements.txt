@@ -1,0 +1,9 @@
+# Pinned to versions documented by Rathore et al. (2024), Section 2.2:
+# "We develop our experiments in PyTorch 2.0.0 with Python 3.10.12."
+# We allow >= 2.0.0 since later patch releases preserve numerics.
+torch>=2.0.0
+numpy>=1.23
+PyYAML>=6.0
+# Optional: PyHessian for Hessian spectral-density visualizations
+# (Section 5; the addendum allows third-party libraries for this).
+pyhessian>=0.1.0; python_version >= "3.8"

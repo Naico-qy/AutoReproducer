@@ -1,0 +1,109 @@
+# Hyperparameters reproducing
+#   Lee et al. 2024, "A Mechanistic Understanding of Alignment Algorithms:
+#   A Case Study on DPO and Toxicity" (ICML 2024)
+#
+# Note: Llama2 results are out of scope (per addendum.md). All defaults below
+# target GPT-2 medium, the only in-scope model.
+
+# ---- Model -----------------------------------------------------------------
+model:
+  name: gpt2-medium # 24 layers, d_model=1024, d_mlp=4096, GeLU MLP
+  dtype: float32 # paper does not use mixed precision for GPT-2 medium
+  device: cuda # falls back to cpu if not available
+
+# ---- Toxic-vector extraction (Section 3.1) ---------------------------------
+probe:
+  # Linear probe trained on Jigsaw toxic-comment-classification.
+  # addendum.md: W_toxic is a [d_model, 2] matrix (logits over {non-toxic, toxic});
+  # the "probe vector" used for cosine similarity is W_toxic[:, 1].
+  jigsaw_dataset: thesofakillers/jigsaw-toxic-comment-classification-challenge
+  train_val_split: 0.9
+  feature_layer: -1 # last layer residual stream, mean-pooled across tokens
+  batch_size: 32
+  epochs: 3
+  lr: 1.0e-4
+  weight_decay: 0.01
+  target_accuracy: 0.94 # paper reports 94% validation accuracy
+
+mlp_toxic:
+  # Number of MLP value vectors selected by cosine similarity vs W_toxic[:, 1].
+  n_top: 128 # paper Section 3.1, footnote: "We experiment with different values for N"
+  # SVD on the d x N matrix -> per addendum.md, transpose of the N x d matrix
+  svd_n_components: 128
+
+# ---- DPO data construction with PPLM (Section 4.2) ------------------------
+pplm:
+  base_model: gpt2-medium
+  prompt_dataset: wikitext-2-raw-v1
+  num_pairs: 24576 # paper: "24,576 pairs of toxic and nontoxic continuations"
+  generation_length: 20
+  # PPLM (Dathathri 2019) hyper-params used as classifier-guided steering toward toxic.
+  pplm_step_size: 0.04
+  pplm_num_iterations: 3
+  pplm_window_length: 5
+  pplm_horizon_length: 1
+  pplm_kl_scale: 0.01
+  pplm_gm_scale: 0.95
+  pplm_gamma: 1.5
+  classifier: w_toxic # use the trained probe vector itself
+
+# ---- DPO training (Section 4 + Appendix E) --------------------------------
+dpo:
+  # 90:10 split, ~6700 pairs needed for convergence (addendum.md)
+  train_val_split: 0.9
+  beta: 0.1 # canonical Rafailov 2023 default; paper does not override
+  lr: 1.0e-6 # GPT-2 medium DPO LR; small to satisfy KL constraint
+  warmup_steps: 150
+  batch_size: 8
+  grad_accum_steps: 2
+  max_steps: 6700 # ~6700 pairs to convergence per addendum.md
+  patience: 10 # early stop on val DPO loss with patience 10
+  max_seq_len: 128
+  optimizer: adamw
+  weight_decay: 0.0
+  loss_type: sigmoid # standard DPO sigmoid loss
+  reference_free: false
+
+# ---- Evaluation (Section 3.3 + Section 5) ---------------------------------
+eval:
+  # Toxicity: paper uses Perspective API; addendum says use unitary/unbiased-toxic-roberta.
+  toxicity_model: unitary/unbiased-toxic-roberta
+  toxicity_prompts:
+    name: allenai/real-toxicity-prompts
+    split: challenge # 1199 challenge prompts (Section 3.3)
+    max_prompts: 1199
+    gen_length: 20
+  perplexity:
+    dataset: wikitext-2-raw-v1
+    stride: 512
+    seq_len: 1024
+  f1:
+    n_prompts: 2000
+    gen_length: 20
+    source: wikitext # 2000 Wikipedia sentences (Section 3.3, F1)
+
+# ---- Interventions (Section 3.3) -------------------------------------------
+interventions:
+  layer: -1 # subtract from last layer residual stream
+  alphas: # heuristic scales -- tuned so post-PPL ~ post-DPO PPL (~23.34)
+    w_toxic: 8.0
+    mlp_v_770_19: 25.0
+    svd_u_0: 8.0
+
+# ---- Un-aligning (Section 6) ----------------------------------------------
+unalign:
+  # GPT2_DPO: scale top-7 toxic key vectors by 10x to re-activate toxic regions.
+  n_top_keys: 7
+  scale_factor: 10.0
+
+# ---- Output paths ----------------------------------------------------------
+output:
+  root: ./outputs
+  probe_ckpt: ./outputs/probe/w_toxic.pt
+  toxic_vectors: ./outputs/toxic_vectors.pt
+  pairwise_data: ./outputs/pairwise_toxicity_24576.jsonl
+  dpo_ckpt: ./outputs/gpt2_dpo
+  metrics_json: ./outputs/metrics.json
+
+# ---- Reproducibility -------------------------------------------------------
+seed: 42

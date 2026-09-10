@@ -1,0 +1,92 @@
+# Semantic Self-Consistency -- default hyperparameters
+# Source: paper §3, §4, Appendix I, J; addendum.md
+# Knappe et al., "Semantic Self-Consistency: Enhancing Language Model Reasoning
+# via Semantic Weighting". (Algoverse AI Research, 2024.)
+
+# ---- Generation (paper Appendix I.3, I.4, J.1) ----
+generation:
+  # k = 10 sampled rationales -- addendum.md line 11
+  num_samples: 10
+  # Static temperature 0.8 across all main experiments -- Appendix J.1
+  temperature: 0.8
+  # top-k 50, top-p 50 -- Appendix I.3 (note: paper writes top-p: 50,
+  # we interpret as top_p=0.95 for OpenAI which only exposes top_p, and
+  # top_k=50 for HF generators).
+  top_k: 50
+  top_p: 0.95
+  do_sample: true
+  # Per-dataset max_new_tokens -- Appendix I.4
+  max_new_tokens:
+    svamp: 250
+    aqua_rat: 400
+    strategyqa: 450
+    humaneval: 400 # also mentioned in I.4 although not in main eval
+
+# ---- Models (paper §3.1, addendum) ----
+# Per addendum.md: only gpt-3.5-turbo and gpt-4o-mini are required
+# for replication.
+generators:
+  - name: gpt-3.5-turbo
+    type: openai
+    api_kwargs:
+      # Per addendum: examples passed in one message, system prompt fixed
+      system_prompt: "Follow the exact formatting as demonstrated in the examples."
+  - name: gpt-4o-mini
+    type: openai
+    api_kwargs:
+      system_prompt: "Follow the exact formatting as demonstrated in the examples."
+
+# ---- Featurizers (paper §3.2, addendum line 9) ----
+# RoBERTa base (125M) for StrategyQA per addendum.
+# SciBERT for AQuA-RAT and SVAMP per §3.2.
+featurizers:
+  strategyqa: "roberta-base" # addendum.md line 9
+  aqua_rat: "allenai/scibert_scivocab_uncased" # paper §3.2
+  svamp: "allenai/scibert_scivocab_uncased" # paper §3.2
+
+# ---- Datasets (paper §2, Appendix L) ----
+# Splits per Appendix L.
+datasets:
+  aqua_rat:
+    split: "test"
+    n_examples: 254 # Appendix L
+    answer_type: "letter" # multi-choice (a)-(e)
+  svamp:
+    split: "test"
+    n_examples: 1000 # Appendix L: 1000-sample combined train+test
+    answer_type: "number"
+  strategyqa:
+    split: "test"
+    n_examples: 687 # Appendix L
+    answer_type: "boolean"
+
+# ---- Methods (paper §4) ----
+methods:
+  - top_prob # baseline: take highest-prob single sample
+  - sc_baseline # majority vote over k samples (Wang et al. 2022)
+  - cpw # §4.1.1 Centroid Proximity Weighting
+  - scw # §4.1.2 Semantic Consensus Weighting (cosine)
+  - isolation_forest # §4.2 outlier removal
+  - knn_outlier # §4.2 outlier removal
+  - ocsvm # §4.2 outlier removal
+
+# ---- Outlier-detection hyperparameters (Appendix I.2) ----
+outlier:
+  knn:
+    n_neighbors: 5 # I.2.1
+    metric: "euclidean" # I.2.1
+    algorithm: "ball_tree" # I.2.1
+    threshold_pct: 90 # I.2.1 (90% threshold)
+  isolation_forest:
+    n_estimators: 200 # I.2.2
+    contamination: "auto" # I.2.2
+    max_samples: "auto" # I.2.2
+    random_state: 42
+  one_class_svm:
+    kernel: "linear" # I.2.3
+    nu: 0.01 # I.2.3
+    gamma: "scale" # I.2.3
+
+# ---- Reproducibility ----
+seed: 42
+output_dir: "/output"

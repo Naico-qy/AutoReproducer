@@ -1,0 +1,16 @@
+# Core deep-learning stack
+torch>=2.0.0
+torchvision>=0.15.0
+
+# CLIP
+open_clip_torch>=2.20.0
+
+# HuggingFace datasets (per addendum: imagenet-1k via datasets.load_dataset(...))
+datasets>=2.14.0
+huggingface_hub>=0.16.0
+
+# Misc
+PyYAML>=6.0
+numpy>=1.23
+Pillow>=9.0
+tqdm>=4.65

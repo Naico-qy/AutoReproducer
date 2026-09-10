@@ -1,0 +1,67 @@
+# Simformer default config
+# Reference: Gloeckler et al. ICML 2024 "All-in-one simulation-based inference"
+# arXiv:2404.09636 (verified via paper_search; CrossRef lookup of the arXiv DOI
+# returned NOT FOUND because arXiv mints DOIs but does not deposit them with
+# CrossRef -- this is normal for arXiv-only papers).
+
+# Task to train on. One of:
+#   gaussian_linear, two_moons, slcp, gaussian_mixture, hmm, tree
+task: two_moons
+
+# Number of simulations available for training (paper benchmarks 1k, 10k, 100k)
+num_simulations: 10000
+batch_size: 256
+num_steps: 50000 # ICML 2024 spotlights typically use ~50k-100k steps
+lr: 1.0e-4
+weight_decay: 1.0e-5
+seed: 0
+
+# SDE hyperparameters (Variance Exploding SDE -- main results in §4.1)
+sde:
+  type: vesde # one of {vesde, vpsde}
+  sigma_min: 0.01
+  sigma_max: 15.0
+  beta_min: 0.1 # used by VPSDE only
+  beta_max: 20.0 # used by VPSDE only
+  T: 1.0
+  eps: 1.0e-3 # smallest t used in training / sampling
+
+# Model architecture (transformer-based score network)
+model:
+  embedding_dim: 64 # token embedding dim
+  num_heads: 4
+  num_layers: 6
+  ff_dim: 256
+  dropout: 0.0
+  fourier_dim: 64 # diffusion-time Gaussian Fourier features
+
+# Training-time condition-mask sampling distribution (per addendum.md)
+# Each batch element samples a mask from one of:
+#   joint           : all latent  (M_C = 0)
+#   posterior       : params latent, data conditioned
+#   likelihood      : data latent, params conditioned
+#   bernoulli_0p3   : every dim ~ Bernoulli(0.3)
+#   bernoulli_0p7   : every dim ~ Bernoulli(0.7)
+mask_distribution:
+  joint: 0.2
+  posterior: 0.2
+  likelihood: 0.2
+  bernoulli_0p3: 0.2
+  bernoulli_0p7: 0.2
+
+# Whether to apply the structured (graph-derived) attention mask M_E
+use_structured_attention: false # dense attention is the default fall-back
+
+# Sampling hyperparameters
+sampling:
+  num_steps: 50 # paper notes ~50 evaluation steps suffice
+  num_samples: 1000
+
+# Evaluation
+eval:
+  c2st_n_samples: 1000
+  c2st_n_estimators: 100 # random forest with 100 trees -- per addendum.md
+
+# Output
+output_dir: ./output
+checkpoint_every: 5000

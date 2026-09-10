@@ -1,0 +1,97 @@
+# RICE default hyperparameters
+# Source: Cheng et al. ICML 2024 §4.2 + Appendix C + author-provided addendum.
+
+env:
+  name: Hopper-v4 # default; can be overridden via --env
+  sparse: false # toggle SparseHopper / SparseHalfCheetah / SparseWalker2d
+  max_episode_steps: 1000 # standard MuJoCo cap
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage A: Pre-training the (sub-optimal) target policy
+# ──────────────────────────────────────────────────────────────────────────────
+pretrain:
+  algorithm: ppo # paper §4 default; SAC supported via Experiment IV
+  total_timesteps: 1_000_000
+  policy: MlpPolicy # SB3 default — confirmed by addendum
+  policy_kwargs:
+    net_arch: [64, 64] # SB3 default; selfish-mining uses [128]*4, cage uses [64]*3
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage B: Mask-Network training (Algorithm 1, paper §3.3)
+# Re-formulated objective:  J(θ) = max η(π̄)
+# Per-step reward:          R'(s,a) = R(s,a) + α · a^m
+# ──────────────────────────────────────────────────────────────────────────────
+mask:
+  total_timesteps: 500_000
+  alpha: 0.001 # blinding bonus; paper §4.2 Experiment V
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  net_arch: [64, 64] # mask-net is small per StateMask convention
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage C: Refinement (Algorithm 2 — RICE)
+# ──────────────────────────────────────────────────────────────────────────────
+refine:
+  total_timesteps: 1_000_000
+  reset_probability: 0.5 # p ∈ {0, 0.25, 0.5, 0.75, 1}; paper picks 0.25 or 0.5
+  beta: 0.5 # μ(s) = β·d^π̂_ρ(s) + (1-β)·ρ(s)
+  rnd_lambda: 0.01 # λ ∈ {0, 0.001, 0.01, 0.1}; paper §4.3 finding
+  rnd_lr: 1.0e-4
+  rnd_feature_dim: 128
+  rnd_hidden: [128, 128]
+  rnd_normalize_obs: true
+  rnd_normalize_reward: true
+  trajectory_length_K: 1000 # K in Algorithm 2: length of trajectory used to identify s_t
+  learning_rate: 3.0e-5 # lowered for fine-tuning per §4.1 "PPO fine-tuning" baseline
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Baselines (paper §4.1)
+# ──────────────────────────────────────────────────────────────────────────────
+baselines:
+  ppo_ft:
+    learning_rate: 3.0e-5 # "lowering the learning rate" per paper
+  statemask_r:
+    learning_rate: 3.0e-4
+    reset_probability: 1.0 # always reset to critical state — the StateMask-R definition
+  jsrl:
+    n_curriculum_stages: 10
+    rollin_horizon_decay: linear
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Evaluation (paper §4.1 + addendum)
+# ──────────────────────────────────────────────────────────────────────────────
+eval:
+  n_eval_episodes: 100
+  fidelity_n_trajectories: 500 # paper "across 500 trajectories"
+  fidelity_top_K: [0.1, 0.2, 0.3, 0.4] # K = 10%, 20%, 30%, 40%
+  d_max: # env-specific episode reward bound
+    Hopper-v4: 4000.0
+    Walker2d-v4: 4000.0
+    Reacher-v4: 0.0
+    HalfCheetah-v4: 4000.0
+
+logging:
+  log_dir: ./runs
+  output_dir: /output
+  seed: 0

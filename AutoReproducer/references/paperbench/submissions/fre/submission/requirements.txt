@@ -1,0 +1,21 @@
+# FRE: Functional Reward Encoding -- dependencies
+# PyTorch is canonical for ICML 2024 research codebases.
+# (The original paper uses Jax/Flax, but PyTorch is mirrored here for portability;
+#  network sizes, hyperparameters, and algorithmic structure are identical.)
+
+torch>=2.0.0
+numpy>=1.23.0
+pyyaml>=6.0
+tqdm>=4.65.0
+einops>=0.6.0
+opensimplex>=0.4.4   # used for ant-random-simplex eval rewards (addendum)
+
+# Offline RL benchmark datasets. D4RL pre-June-2024 commit recommended (addendum).
+# These are optional at install time -- the smoke run uses synthetic data when
+# the heavy gym/mujoco stack is unavailable.
+gym==0.23.1 ; python_version<"3.11"
+mujoco>=2.3.0
+# d4rl @ git+https://github.com/Farama-Foundation/D4RL.git@71a9549f2091accff93eeff68f1f3ab2c0e0a288  # pin; install in container
+
+# Optional: dm_control for ExORL walker/cheetah physics state augmentation.
+dm_control>=1.0.14 ; python_version<"3.12"

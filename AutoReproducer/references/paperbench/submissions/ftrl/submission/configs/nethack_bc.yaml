@@ -1,0 +1,29 @@
+# Fine-tuning + BC on NetHack.
+# §4 / App. B.1: BC uses the AutoAscend trajectories (NLD-AA buffer).
+env: nethack
+character: "mon-hum-neu-mal"
+algo: appo
+total_steps: 500_000_000
+retention: behavioral_cloning # L_BC = E_{s∼B_BC} KL(π_θ || π*)
+bc_loss_coef: 2.0 # App. B.1: "scaled by a factor of 2.0"
+bc_decay: 1.0 # App. B.1: "no decay was used here"
+bc_dataset: nld_aa # paper's NLD-AA dataset
+bc_batches_per_step: 1
+load_pretrained: true
+freeze_encoders: true
+freeze_baseline_pretrain_steps: 500_000_000
+disable_entropy_bonus: true
+hidden_dim: 1738
+batch_size: 128
+unroll_length: 32
+discounting: 0.999999
+appo_clip_policy: 0.1
+appo_clip_baseline: 1.0
+adam_learning_rate: 1.0e-4
+weight_decay: 1.0e-4
+adam_eps: 1.0e-7
+grad_norm_clipping: 4
+baseline_cost: 1.0
+entropy_cost: 0.0
+reward_clip: 10
+reward_scale: 1.0

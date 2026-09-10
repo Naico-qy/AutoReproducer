@@ -1,0 +1,5 @@
+# 大型二进制/缓存不入库：23 篇论文的 architecture.png 合计约 58 MB，
+# 且与复现无关；本地需要时从 PaperGuru-Benchmark 原始目录取。
+figures/
+__pycache__/
+*.pyc

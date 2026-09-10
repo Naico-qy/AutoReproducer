@@ -1,0 +1,74 @@
+# Default config — overridden by env-specific configs in this directory.
+seed: 42
+device: cuda
+
+# Hyperparameters from Table 1 (NetHack, App. B.1)
+nethack:
+  activation_function: relu
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1.0e-7
+  adam_learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  appo_clip_policy: 0.1
+  appo_clip_baseline: 1.0
+  baseline_cost: 1.0
+  discounting: 0.999999
+  entropy_cost: 0.001
+  grad_norm_clipping: 4
+  hidden_dim: 1738
+  batch_size: 128
+  penalty_step: 0.0
+  penalty_time: 0.0
+  reward_clip: 10
+  reward_scale: 1.0
+  unroll_length: 32
+
+# Hyperparameters from Table 2 (Montezuma, App. B.2)
+montezuma:
+  max_step_per_episode: 4500
+  ext_coef: 2.0
+  learning_rate: 1.0e-4
+  num_env: 128
+  num_step: 128
+  gamma: 0.999
+  int_gamma: 0.99
+  lam: 0.95
+  stable_eps: 1.0e-8
+  state_stack_size: 4
+  preproc_h: 84
+  preproc_w: 84
+  use_gae: true
+  use_gpu: true
+  use_norm: false
+  use_noisy_net: false
+  clip_grad_norm: 0.5
+  entropy: 0.001
+  epoch: 4
+  mini_batch: 4
+  ppo_eps: 0.1
+  int_coef: 1.0
+  sticky_action: true
+  action_prob: 0.25
+  update_proportion: 0.25
+  life_done: false
+  obs_norm_step: 50
+
+# Hyperparameters from Table 3 + App. B.3 (RoboticSequence / Meta-World)
+robotic_sequence:
+  hidden_layers: 4
+  hidden_dim: 256
+  activation: leaky_relu
+  layer_norm_first_layer: true
+  learning_rate: 1.0e-3
+  optimizer: adam
+  batch_size: 128
+  buffer_size: 100000
+  episode_length: 200
+  beta_terminal_bonus: 1.5
+  ewc_actor_coef: 100.0
+  ewc_critic_coef: 0.0
+  bc_actor_coef: 1.0
+  bc_buffer_size: 10000
+  em_buffer_size: 10000
+  apply_retention_to_critic: false

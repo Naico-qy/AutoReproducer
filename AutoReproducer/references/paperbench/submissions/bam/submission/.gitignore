@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+outputs/
+checkpoints/
+datasets/
+*.pt
+*.npz
+.DS_Store

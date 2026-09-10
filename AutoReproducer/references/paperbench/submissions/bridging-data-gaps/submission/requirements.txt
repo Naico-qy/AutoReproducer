@@ -1,0 +1,15 @@
+# Core
+torch>=2.0
+torchvision>=0.15
+numpy>=1.23
+Pillow>=9.0
+pyyaml>=6.0
+
+# Diffusion sampling utilities
+einops>=0.7
+
+# Metrics (optional but used by eval.py if available)
+lpips>=0.1.4
+pytorch-fid>=0.3.0
+torchmetrics>=1.0.0
+scipy>=1.10

@@ -1,0 +1,17 @@
+# Core deep-learning stack used by APT.
+# Versions chosen to match those reported in the official APT release
+# (https://github.com/ROIM1998/APT) at the time of ICML 2024.
+torch>=2.0.0
+transformers>=4.36.0
+datasets>=2.16.0
+accelerate>=0.25.0
+evaluate>=0.4.0
+scikit-learn>=1.3.0
+scipy>=1.10.0
+numpy>=1.24.0
+pyyaml>=6.0
+tqdm>=4.65.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+nltk>=3.8
+rouge-score>=0.1.2

@@ -1,0 +1,88 @@
+# Default hyperparameters for "Batch and Match: Black-box Variational Inference
+# with a Score-based Divergence" (Cai et al., ICML 2024).
+#
+# Each section below corresponds to one experiment in the paper.  Defaults are
+# taken from the paper text and the addendum; learning rates for the
+# gradient-based methods are placeholders -- the actual values come from a
+# grid search performed by ``train.py``.
+
+experiment:
+  gaussian_5_1 # one of: gaussian_5_1, sinh_arcsinh_5_1,
+  #         posteriordb_5_2, vae_5_3
+seed: 0
+output_dir: ./outputs
+
+# ---------------------------------------------------------------------------
+# Section 5.1 -- Gaussian targets of increasing dimension
+# ---------------------------------------------------------------------------
+gaussian_5_1:
+  dims: [4, 16, 64, 256]
+  bam_batch_sizes: [2, 4, 8, 16, 64] # the paper sweeps batch size in BaM
+  baseline_batch_size: 2 # ADVI / Score / Fisher / GSM
+  n_iters: 1000
+  n_runs: 10
+  lambda_schedule: constant # lam_t = B * D
+  init_scale: 1.0 # variational init: N(0, I)
+  grid_lr_advi: [1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2]
+  grid_lr_score: [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+  grid_lr_fisher: [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+  # Figure E.1 (low-rank BaM): batch size B = 4 except D = 4 where B = 3
+  # (per the addendum).
+  low_rank_batch_size_default: 4
+  low_rank_batch_size_d4: 3
+
+# ---------------------------------------------------------------------------
+# Section 5.1 -- Non-Gaussian (sinh-arcsinh normal) targets
+# ---------------------------------------------------------------------------
+sinh_arcsinh_5_1:
+  dim: 16
+  skews: [0.2, 1.0, 1.8]
+  tails: [0.1, 0.9, 1.7]
+  bam_batch_sizes: [5, 10, 50]
+  baseline_batch_size: 5
+  n_iters: 1000
+  n_runs: 10
+  lambda_schedule: decaying # lam_t = B * D / (t + 1)
+  grid_lr_advi: [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+
+# ---------------------------------------------------------------------------
+# Section 5.2 -- PosteriorDB Bayesian hierarchical models
+# ---------------------------------------------------------------------------
+posteriordb_5_2:
+  posteriors: ["ark", "gp-pois-regr", "eight-schools-centered"]
+  batch_sizes: [8, 32]
+  n_iters: 500
+  n_runs: 5
+  lambda_schedule: decaying # lam_t = B * D / (t + 1)
+  grid_lr_advi: [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+
+# ---------------------------------------------------------------------------
+# Section 5.3 -- Deep generative model (VAE on CIFAR-10)
+# ---------------------------------------------------------------------------
+vae_5_3:
+  latent_dim: 256
+  c_hid: 32
+  sigma2: 0.1
+  image_size: 32
+  channels: 3
+  # VAE training (per addendum)
+  vae_batch_size: 100
+  vae_n_epochs: 5
+  vae_optimizer: adam
+  vae_lr_init: 0.0
+  vae_lr_peak: 1.0e-4
+  vae_warmup_steps: 100
+  vae_decay_steps: 500
+  vae_lr_end: 1.0e-5
+  vae_warmup_fn: linear
+  vae_mc_sim: 1
+  # Posterior inference (BaM / ADVI / GSM at test time)
+  bam_batch_sizes: [10, 50, 100, 300]
+  bam_n_iters_pilot: 100
+  bam_n_iters_full: 1000
+  bam_lambda_schedule: decaying # lam_t = B * D / (t + 1)
+  advi_batch_size: 10
+  advi_n_iters: 1000
+  grid_lr_advi: [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+  # Reconstruction MSE evaluation
+  n_test_images: 100

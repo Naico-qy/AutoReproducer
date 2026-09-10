@@ -1,0 +1,55 @@
+# In-painting on ImageNet-256 (Section 4.1)
+task: inpainting
+
+data:
+  dataset: imagenet-1k
+  image_size: 256
+  num_classes: 1000
+  num_workers: 4
+  trust_remote_code: true
+
+coupling:
+  kind: inpainting
+  inpaint_tiles: 64
+  inpaint_p_mask: 0.3
+  sigma: 0.0
+
+interpolant:
+  # §4.1 explicitly chooses α_t = t, β_t = 1-t, γ_t = 0 for in-painting
+  schedule: linear_no_noise
+
+model:
+  dim: 256
+  dim_mults: [1, 1, 2, 3, 4]
+  resnet_block_groups: 8
+  learned_sinusoidal_cond: true
+  learned_sinusoidal_dim: 32
+  attn_dim_head: 64
+  attn_heads: 4
+  random_fourier_features: false
+  num_classes: 1000
+  apply_inpaint_mask_at_output: true
+
+train:
+  batch_size: 32
+  steps: 200000
+  optimizer: adam
+  lr: 2.0e-4
+  weight_decay: 0.0
+  scheduler: steplr
+  step_size: 1000
+  gamma: 0.99
+  grad_clip: 10000.0
+  ema_decay: 0.9999
+  precision: bf16-mixed
+  log_every: 100
+  ckpt_every: 5000
+  output_dir: runs/inpainting
+
+eval:
+  num_samples: 100
+  solver: dopri5
+  rtol: 1.0e-5
+  atol: 1.0e-5
+  num_steps_euler: 100
+  output_dir: runs/inpainting/eval

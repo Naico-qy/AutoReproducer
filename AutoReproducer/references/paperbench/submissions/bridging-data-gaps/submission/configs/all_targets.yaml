@@ -1,0 +1,84 @@
+# =====================================================================
+# All target-specific hyperparameters from addendum.md (Table 3 settings)
+# Each entry overrides default.yaml for that source -> target pair.
+# =====================================================================
+
+ddpm_ffhq_babies:
+  framework: ddpm
+  data: { source: ffhq, target: babies }
+  train: { lr: 5.0e-6, iterations: 160 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 3.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ddpm_ffhq_sunglasses:
+  framework: ddpm
+  data: { source: ffhq, target: sunglasses }
+  train: { lr: 5.0e-5, iterations: 200 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 15.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ddpm_ffhq_raphael:
+  framework: ddpm
+  data: { source: ffhq, target: raphael }
+  train: { lr: 5.0e-5, iterations: 500 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 10.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ddpm_lsun_haunted:
+  framework: ddpm
+  data: { source: lsun_church, target: haunted_houses }
+  train: { lr: 5.0e-5, iterations: 320 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 10.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ddpm_lsun_landscape:
+  framework: ddpm
+  data: { source: lsun_church, target: landscape }
+  train: { lr: 5.0e-5, iterations: 500 }
+  adaptor: { c: 16, d: 8 }
+  similarity: { gamma: 10.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ldm_ffhq_babies:
+  framework: ldm
+  data: { source: ffhq, target: babies }
+  train: { lr: 5.0e-6, iterations: 320 }
+  adaptor: { c: 16, d: 8 }
+  similarity: { gamma: 5.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ldm_ffhq_sunglasses:
+  framework: ldm
+  data: { source: ffhq, target: sunglasses }
+  train: { lr: 1.0e-5, iterations: 280 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 5.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ldm_ffhq_raphael:
+  framework: ldm
+  data: { source: ffhq, target: raphael }
+  train: { lr: 1.0e-5, iterations: 320 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 5.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ldm_lsun_haunted:
+  framework: ldm
+  data: { source: lsun_church, target: haunted_houses }
+  train: { lr: 2.0e-5, iterations: 500 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 5.0 }
+  adversarial: { J: 10, omega: 0.02 }
+
+ldm_lsun_landscape:
+  framework: ldm
+  data: { source: lsun_church, target: landscape }
+  train: { lr: 2.0e-5, iterations: 500 }
+  adaptor: { c: 8, d: 8 }
+  similarity: { gamma: 5.0 }
+  adversarial: { J: 10, omega: 0.02 }

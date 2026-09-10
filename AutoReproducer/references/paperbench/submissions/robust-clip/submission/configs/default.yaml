@@ -1,0 +1,98 @@
+# FARE: Unsupervised Adversarial Fine-Tuning of CLIP
+# Hyperparameters from the paper (Schlarmann, Singh, Croce, Hein. ICML 2024).
+# Section B.1 "General Setup" + Table 8 final selection (LR=1e-5, WD=1e-4).
+#
+# Verified citation:
+#   Mao et al. "Understanding zero-shot adversarial robustness for large-scale
+#   models", ICLR 2023 — baseline TeCoA — used as the comparator throughout.
+
+# ---- Model ----
+model:
+  # Paper uses OpenAI ViT-L/14 as the canonical encoder for FARE^2 / FARE^4.
+  # The ablation in Sec. B.3 uses ViT-B/32 — both are supported.
+  clip_model_name: "ViT-L-14" # open_clip identifier
+  clip_pretrained: "openai" # OpenAI weights (per addendum)
+  image_resolution: 224 # ViT-L/14 @ 224 (NOT @ 336)
+  embedding_dim: 768 # ViT-L/14 width / class-token dim
+  use_class_token_only: true # Sec. B.1: class token suffices
+
+# ---- Adversarial training ----
+adversarial:
+  # Paper: PGD with 10 steps, alpha = 1/255, eps in {2/255, 4/255}.
+  # See Sec. B.1 "Adversarial Training setup".
+  attack: "pgd"
+  epsilon: 0.00784313725490196 # 2/255  (use 4/255 = 0.01568627 for FARE^4)
+  alpha: 0.00392156862745098 # 1/255 step size
+  num_steps: 10
+  norm: "linf"
+  random_start: true # uniform random init (per addendum)
+  momentum: 0.9 # PGD momentum factor (per addendum)
+
+# ---- FARE loss ----
+loss:
+  # Eq. (3) of the paper: squared L2 distance between phi_FT(z) and phi_Org(x).
+  # Sec. B.4 ablates ||·||_1 — only ||·||_2^2 is used in main results.
+  type: "l2_squared" # one of: l2_squared, l1
+  use_class_token_only: true
+
+# ---- Optimizer ----
+optimizer:
+  name: "adamw" # Loshchilov & Hutter (2018)
+  lr: 1.0e-5 # peak LR (Table 8 chosen row)
+  weight_decay: 1.0e-4 # WD (Table 8 chosen row)
+  betas: [0.9, 0.95] # Sec. B.1 explicit
+  eps: 1.0e-8
+
+# ---- LR schedule ----
+schedule:
+  type: "cosine_with_warmup"
+  warmup_fraction: 0.07 # warmup over first 7% of total steps
+
+# ---- Training ----
+training:
+  dataset: "imagenet" # ImageNet train split (per Sec. B.1)
+  num_epochs: 2 # 2 epochs total
+  batch_size: 128 # effective batch size
+  per_device_batch_size: 32 # adjust based on GPU memory
+  grad_accumulation_steps: 4 # 4 * 32 = 128
+  num_workers: 8
+  precision: "fp16" # mixed-precision training
+  log_every: 50
+  save_every: 1 # epochs
+  output_dir: "./checkpoints"
+  seed: 0
+  # Sec. B.1: input pixels normalized with CLIP mean/std AFTER perturbation
+  # is added in [0, 1] pixel space (epsilon is in [0,1] units = 2/255 or 4/255).
+
+# ---- Evaluation ----
+evaluation:
+  # Zero-shot classification: AutoAttack APGD-CE then APGD-DLR-T,
+  # 100 iterations each, on 1000 samples per dataset (Sec. B.10).
+  apgd_iters: 100
+  num_eval_samples: 1000
+  attack_radii: [0.00784313725490196, 0.01568627450980392] # 2/255, 4/255
+  datasets:
+    - "imagenet"
+    - "cifar10"
+    - "cifar100"
+    - "stl10"
+    - "caltech101"
+    - "stanfordcars"
+    - "dtd"
+    - "eurosat"
+    - "fgvc_aircraft"
+    - "flowers102"
+    - "imagenet_r"
+    - "imagenet_sketch"
+    - "pcam"
+    - "oxford_pets"
+  resolution_native: ["cifar10", "cifar100", "stl10"] # eval at native res
+  resolution_default: 224
+
+# ---- Smoke run (used by reproduce.sh in resource-constrained settings) ----
+smoke:
+  enabled: true
+  max_train_steps: 50
+  max_eval_samples: 50
+  per_device_batch_size: 4
+  grad_accumulation_steps: 1

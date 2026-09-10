@@ -1,0 +1,27 @@
+# Fine-tuning + EWC on RoboticSequence (Table 3).
+env: robotic_sequence
+algo: sac
+total_steps: 4_000_000
+retention: ewc
+ewc_actor_coef: 100.0 # Table 3
+ewc_critic_coef: 0.0 # do not regularize critic (App. C.5)
+fisher_n_batches: 10000
+load_pretrained: true
+pretrained_stages: ["peg-unplug-side", "push-wall"]
+sequence:
+  - hammer
+  - push
+  - peg-unplug-side
+  - push-wall
+hidden_layers: 4
+hidden_dim: 256
+activation: leaky_relu
+layer_norm_first_layer: true
+learning_rate: 1.0e-3
+batch_size: 128
+buffer_size: 100000
+gamma: 0.99
+tau: 0.005
+auto_entropy: true
+beta_terminal_bonus: 1.5
+episode_length: 200

@@ -1,0 +1,66 @@
+# Default hyperparameters for SMM (Sample-specific Multi-channel Masks)
+# Source: Cai et al., "Sample-specific Masks for Visual Reprogramming-based Prompting", ICML 2024
+# Hyperparameters mirror Table 9 (mask-generator training params) and the
+# baseline-pattern training schedule from Section 5 (Chen et al., 2023).
+
+# ---- Pre-trained backbone (frozen) ----
+# Choices: 'resnet18', 'resnet50', 'vit_b32'
+network: resnet18
+
+# ---- Target dataset ----
+# Choices: cifar10, cifar100, svhn, gtsrb, flowers102, dtd, ucf101,
+#          food101, sun397, eurosat, oxfordpets
+dataset: cifar10
+data_root: ./datasets
+
+# ---- Image sizes (from addendum) ----
+# imgsize=384 for ViT_B32, else 224
+# Set automatically inside data/loader.py based on `network`.
+
+# ---- Output mapping (Sec 2.3) ----
+# Choices: 'ilm' (iterative label mapping, default per paper Sec 5),
+#          'flm' (frequent label mapping), 'rlm' (random label mapping)
+mapping_method: ilm
+
+# ---- SMM hyperparameters (Sec 3.2/3.3) ----
+# Number of MaxPooling layers in f_mask. Determines patch size 2^l for
+# patch-wise interpolation. Section 5 fixes patch_size=8 (l=3).
+mask_num_pool_layers: 3
+patch_size: 8
+
+# ---- Training schedule (Table 9) ----
+# 5-layer mask generator (ResNet backbones): alpha=0.01, gamma=0.1
+# 6-layer mask generator (ViT backbone)    : alpha=0.001, gamma=1.0
+# milestones: [0, 100, 145] -> 200 total epochs (Sec 5)
+epochs: 200
+milestones: [100, 145]
+lr_pattern: 0.01 # learning rate for shared noise delta (alpha_1, Algorithm 1)
+lr_mask: 0.01 # learning rate for f_mask phi      (alpha_2, Algorithm 1)
+lr_decay: 0.1 # gamma applied at each milestone
+weight_decay: 0.0
+momentum: 0.9
+optimizer: sgd # SGD as in Chen et al. 2023 (codebase tmlr-group/SMM)
+batch_size: 256
+batch_size_small: 64 # for DTD and OxfordPets (Table 9)
+num_workers: 4
+seed: 7
+
+# ---- Method variant (for ablation, Table 3) ----
+# Choices: 'smm'                 (full method: r(x) + delta ⊙ f_mask(r(x)))
+#          'only_delta'          (shared pattern, full mask)
+#          'only_fmask'          (sample-specific pattern, no shared delta)
+#          'single_channel_smm'  (1-channel f_mask)
+#          'pad'                 (padding-based reprogramming)
+#          'narrow' / 'medium' / 'full'  (watermarking with fixed mask)
+method: smm
+
+# ---- Reproduce / smoke test ----
+# When `smoke_test: true`, train for `smoke_epochs` and skip per-dataset
+# heavy hyperparameter searches. Use this for the 24h reproduce.sh budget.
+smoke_test: false
+smoke_epochs: 2
+
+# ---- Logging ----
+output_dir: ./output
+ckpt_dir: ./output/checkpoints
+log_interval: 50

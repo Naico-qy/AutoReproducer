@@ -1,0 +1,19 @@
+# Core deps for CompoNet implementation.
+# Pinned to versions known to work on PaperBench's reproduction container
+# (Python 3.10 / CUDA 12.x).  Ranges are conservative.
+
+numpy>=1.24,<2.2
+torch>=2.0,<2.6
+PyYAML>=6.0
+
+# Environments (per addendum).
+gymnasium>=0.29,<1.1
+gymnasium[atari,accept-rom-license]>=0.29,<1.1
+ale-py>=0.8.1
+opencv-python-headless>=4.6
+# Meta-World (Farama Foundation port -- per addendum.md):
+metaworld @ git+https://github.com/Farama-Foundation/Metaworld@master
+
+# Optional / for diagnostics:
+matplotlib>=3.7
+tqdm>=4.65
