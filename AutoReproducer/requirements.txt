@@ -2,5 +2,5 @@ streamlit>=1.28.0
 streamlit-autorefresh>=1.0.0
 pdfplumber>=0.10.0
 PyPDF2>=3.0.0
-# 测试依赖（python -m pytest tests/ -v）
+# test deps (python -m pytest tests/ -v)
 pytest>=8.0.0

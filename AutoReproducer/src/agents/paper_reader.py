@@ -21,7 +21,7 @@ class PaperReaderAgent(BaseAgent):
     # LLM 输出中可能包裹 JSON 的常见噪音
     _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
     # 判定字段是否为空/占位值（"未知""N/A" 及其变体，如
-    # "未知（LLM 不可用时本地降级提取）"），与 CodeExecutor 的判据一致
+    # "未知（LLM 解析失败，本地降级提取）"），与 CodeExecutor 的判据一致
     _UNKNOWN_RE = re.compile(
         r"^\s*(|未知.*|未找到|无|n/?a|none|null)\s*$", re.IGNORECASE)
 
@@ -153,11 +153,22 @@ metrics 填 {{}}），并把 "insufficient_info" 设为 true。
 
     @staticmethod
     def _fallback_extract(text: str, title: str) -> Dict:
-        """本地规则降级：从文本中提取标题、指标与代码链接。"""
+        """本地规则降级：从文本中提取标题、指标与代码链接。
+
+        method 必须保持「未知」开头（下游 `_judge_insufficient` / CodeExecutor
+        据此判定信息不足），但括号内如实说明降级原因，避免把「PDF 文本提取失败」
+        误报成「LLM 不可用」。
+        """
+        text = text or ""
+        if text.strip():
+            method = "未知（LLM 解析失败，本地降级提取）"
+        else:
+            method = ("未知（未获取到论文正文：PDF 文本提取失败，"
+                      "可能缺少 PyPDF2/pdfplumber 依赖，或为扫描件/图片型 PDF）")
         info: Dict = {
             "title": title or "未知标题",
             "authors": [],
-            "method": "未知（LLM 不可用时本地降级提取）",
+            "method": method,
             "dependencies": [],
             "metrics": {},
             "dataset": "未知",

@@ -39,6 +39,27 @@
 
 ---
 
+## [2026.09.10-4] - 2026-09-10
+
+### 修复（环境依赖 + 诚实降级）
+
+- **补齐 PDF 解析依赖**：此前环境缺 PyPDF2 / pdfplumber，`PaperReader._extract_text`
+  恒返回空文本，上传 PDF 会退化成「未知标题 → 信息不足 → 无法验证」。现安装
+  PyPDF2 3.0.1 / pdfplumber 0.11.10（`requirements.txt` 已列出，见下）。
+- **`PaperReader._fallback_extract` 诚实说明降级原因**：原先把所有本地降级都
+  写成「未知（LLM 不可用时本地降级提取）」，误导用户以为是 LLM 挂了；实为
+  「PDF 文本提取失败」（缺依赖 / 扫描件）。现按「正文为空」/「LLM 解析失败」两
+  种情况分别标注，`method` 仍以「未知」开头，`_judge_insufficient` 的判据不受影响。
+- **`requirements.txt` 中文注释改为 ASCII**：Windows GBK 环境下 `pip install -r
+  requirements.txt` 会因 UTF-8 中文注释触发 `UnicodeDecodeError` 直接失败；
+  改为英文注释后可在任意 locale 下安装。
+
+### 测试
+
+- 全量 **133 passed**（含前端 AppTest 冒烟测试，此前因缺 streamlit 被跳过）。
+
+---
+
 ## [2026.09.10-2] - 2026-09-10
 
 ### 修复（复现核心闭环，Batch 1）
