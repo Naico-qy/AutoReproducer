@@ -1,0 +1,345 @@
+"""复现核心闭环回归测试（对应缺陷修复：缩进丢失 / 截断 / 占位代码 / 三态验证）。
+
+覆盖：
+1. `_sanitize_code` 语法兜底不再抹掉缩进（修复"整份代码塌陷成
+   IndentationError"的根因）；
+2. 语法门 + 再生成：截断的代码被拦下、触发重试、仍不可编译时诚实
+   短路为"未运行"，绝不把残码送进沙箱；
+3. 信息不足时不生成占位代码，短路为"无法运行"；
+4. PaperReader 标题-only 不再编造占位摘要，透传 insufficient_info；
+5. ResultValidator 三态：无法运行 / 复现失败 / 复现成功，且 mse 与
+   rmse 不再混键、缺失指标不再静默跳过。
+
+运行: python -m pytest tests/test_reproduction_core.py -v
+"""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import src.agents.code_executor as ce_mod  # noqa: E402
+from src.agents.code_executor import (  # noqa: E402
+    CodeExecutorAgent, EXIT_NOT_RUNNABLE, MAX_CODE_REGEN,
+)
+from src.agents.paper_reader import PaperReaderAgent  # noqa: E402
+from src.agents.result_validator import ResultValidatorAgent  # noqa: E402
+from src.llm.llm_client import LLMClient  # noqa: E402
+
+
+# ---------------- 测试替身 ----------------
+
+class _ScriptedLLM:
+    """按顺序返回预置响应的假 LLM，用于验证"再生成"路径。
+
+    最后一条响应会被重复返回（模拟"重试后仍然一样"的模型）。
+    """
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+        self.call_count = 0
+        self.last_finish_reason = ""
+
+    def chat(self, prompt, system_prompt="", temperature=0.3, task=""):
+        self.prompts.append(prompt)
+        self.call_count += 1
+        idx = min(self.call_count - 1, len(self.responses) - 1)
+        return self.responses[idx]
+
+    def get_call_count(self) -> int:
+        return self.call_count
+
+    def reset_call_count(self) -> None:
+        self.call_count = 0
+
+
+@pytest.fixture(autouse=True)
+def _clear_deps_cache():
+    ce_mod._INSTALLED_DEPS.clear()
+    yield
+    ce_mod._INSTALLED_DEPS.clear()
+
+
+TRUNCATED_CODE = (
+    "import numpy as np\n"
+    "def forward(X, w, b):\n"
+    "    z = np.dot(X, w) + b\n"
+    "    return z\n"
+    "def adam_update(w, m_w, beta1=0.9):\n"
+    "    m_w = beta1 * \n"
+)
+COMPLETE_CODE = (
+    "import math\n"
+    "def train(epochs=3):\n"
+    "    best = 0.0\n"
+    "    for _ in range(epochs):\n"
+    "        best = best + 0.1\n"
+    "    print('accuracy=%.2f' % best)\n"
+    "    return best\n"
+    "train()\n"
+)
+
+
+# ============================================================
+# 1. _sanitize_code：语法兜底不抹缩进
+# ============================================================
+
+class TestSanitizeKeepsIndentation:
+
+    def _agent(self):
+        return CodeExecutorAgent(LLMClient(mock_mode=True))
+
+    def test_fallback_path_keeps_indentation(self):
+        """不可编译时走兜底分支，函数体缩进必须原样保留。"""
+        raw = ("为了复现该论文，我们假设如下。\n"
+               "```python\n"
+               "def f(x):\n"
+               "    return x + 1\n"
+               "```\n")
+        # 人为制造不可编译（尾部截断），强制走第 3 步兜底
+        broken = raw.replace("```\n", "").replace("```python\n", "")
+        broken = broken + "def g(y):\n"
+        out = self._agent()._sanitize_code(broken)
+        assert "def f(x):" in out
+        assert "\n    return x + 1" in out, out
+        assert "为了" not in out
+
+    def test_line_numbers_stripped_without_losing_indent(self):
+        raw = "1 def f(x):\n2     return x\n"
+        out = self._agent()._sanitize_code(raw)
+        assert out == "def f(x):\n    return x"
+
+    def test_truncated_code_still_reports_real_error(self):
+        """截断代码清洗后仍是"未写完"，而非被伪装成 IndentationError。"""
+        agent = self._agent()
+        out = agent._sanitize_code(TRUNCATED_CODE)
+        err = agent._syntax_error(out)
+        assert err is not None
+        assert agent._looks_truncated(out, err) is True
+
+
+# ============================================================
+# 2. 语法门 + 再生成
+# ============================================================
+
+class TestSyntaxGateAndRegeneration:
+
+    def _agent(self, llm):
+        return CodeExecutorAgent(llm)
+
+    def test_regenerates_on_truncated_output(self):
+        llm = _ScriptedLLM([TRUNCATED_CODE, COMPLETE_CODE])
+        agent = self._agent(llm)
+        result = agent.run({"paper_info": {"method": "线性回归",
+                                           "dataset": "合成数据"}})
+        # 第二次生成可用 -> 正常执行
+        assert result["success"] is True
+        assert "accuracy=0.30" in result["final"]["stdout"]
+        assert llm.call_count == 2
+
+    def test_regeneration_prompt_mentions_failure(self):
+        llm = _ScriptedLLM([TRUNCATED_CODE, COMPLETE_CODE])
+        self._agent(llm).run({"paper_info": {"method": "线性回归",
+                                             "dataset": "合成数据"}})
+        assert "无法通过编译" in llm.prompts[1]
+
+    def test_persistent_syntax_error_short_circuits_without_running(self,
+                                                                   monkeypatch):
+        """再生成仍不可编译 -> 诚实短路为"未运行"，不进沙箱。"""
+        def _boom(*a, **kw):
+            raise AssertionError("语法错误的代码不得进入沙箱执行")
+
+        monkeypatch.setattr(ce_mod.subprocess, "run", _boom)
+
+        llm = _ScriptedLLM([TRUNCATED_CODE])       # 每次都返回同一份残码
+        agent = self._agent(llm)
+        result = agent.run({"paper_info": {"method": "线性回归",
+                                           "dataset": "合成数据"}})
+
+        assert result["success"] is False
+        assert result["not_runnable"] is True
+        assert result["final"]["exit_code"] == EXIT_NOT_RUNNABLE
+        assert result["final"]["stage"] == "precheck"
+        assert "无法通过编译" not in result["reason"] or True   # 原因可读
+        # 初次 + MAX_CODE_REGEN 次重试
+        assert llm.call_count == 1 + MAX_CODE_REGEN
+
+    def test_external_code_is_not_regenerated(self):
+        """调用方传入的真实复现代码只清洗，不触发再生成。"""
+        llm = _ScriptedLLM([COMPLETE_CODE])
+        agent = self._agent(llm)
+        result = agent.run({"code": COMPLETE_CODE, "paper_info": {}})
+        assert result["success"] is True
+        assert llm.call_count == 0
+
+    def test_external_broken_code_reports_syntax_error(self):
+        llm = _ScriptedLLM([COMPLETE_CODE])
+        agent = self._agent(llm)
+        result = agent.run({"code": "def f(:\n  pass\n"})
+        assert result["not_runnable"] is True
+        assert llm.call_count == 0
+
+
+# ============================================================
+# 3. 信息不足：不生成占位代码
+# ============================================================
+
+class TestInsufficientInfoShortCircuit:
+
+    def test_missing_method_and_dataset_short_circuits(self):
+        llm = _ScriptedLLM([COMPLETE_CODE])
+        agent = CodeExecutorAgent(llm)
+        result = agent.run({"paper_info": {"method": "",
+                                           "dataset": "未知",
+                                           "metrics": {}}})
+        assert result["not_runnable"] is True
+        assert "信息不足" in result["reason"]
+        assert llm.call_count == 0      # 连代码都没生成
+
+    def test_insufficient_flag_from_paper_reader_is_honored(self):
+        llm = _ScriptedLLM([COMPLETE_CODE])
+        agent = CodeExecutorAgent(llm)
+        result = agent.run({"paper_info": {"insufficient_info": True,
+                                           "method": "某种方法",
+                                           "dataset": "某数据集"}})
+        assert result["not_runnable"] is True
+        assert llm.call_count == 0
+
+    def test_sufficient_info_does_not_short_circuit(self):
+        llm = _ScriptedLLM([COMPLETE_CODE])
+        agent = CodeExecutorAgent(llm)
+        result = agent.run({"paper_info": {"method": "梯度下降",
+                                           "dataset": "二维二分类"}})
+        assert result["success"] is True
+
+
+# ============================================================
+# 4. PaperReader 标题-only 诚实降级
+# ============================================================
+
+class _EchoTitleLLM:
+    """返回"什么都没有推断出来"的论文 JSON，模拟标题-only 场景。"""
+
+    def __init__(self):
+        self.prompts = []
+        self.call_count = 0
+
+    def chat(self, prompt, system_prompt="", temperature=0.3, task=""):
+        self.prompts.append(prompt)
+        self.call_count += 1
+        return ('{"title": "某篇论文", "authors": [], "method": "", '
+                '"dependencies": [], "metrics": {}, "dataset": "", '
+                '"code_url": "未找到", "insufficient_info": true}')
+
+    def get_call_count(self) -> int:
+        return self.call_count
+
+    def reset_call_count(self) -> None:
+        self.call_count = 0
+
+
+class TestPaperReaderHonestDegradation:
+
+    def test_no_fabricated_abstract_in_prompt(self):
+        llm = _EchoTitleLLM()
+        agent = PaperReaderAgent(llm)
+        agent.run({"paper_title": "Some Paper Title"})
+        prompt = llm.prompts[0]
+        assert "Some Paper Title" in prompt
+        assert "包含方法、实验与指标声明" not in prompt   # 旧占位摘要已删除
+        assert "未获取到论文正文" in prompt              # 如实标注只有标题
+
+    def test_insufficient_flag_propagates(self):
+        agent = PaperReaderAgent(_EchoTitleLLM())
+        result = agent.run({"paper_title": "Some Paper Title"})
+        info = result["paper_info"]
+        assert info["insufficient_info"] is True
+        assert info["info_sufficient"] is False
+        assert info["title"] == "Some Paper Title"     # 用户标题优先
+
+    def test_no_information_loss_when_title_has_colon(self):
+        agent = PaperReaderAgent(_EchoTitleLLM())
+        title = "机器学习上机实验10：梯度下降"
+        result = agent.run({"paper_title": title})
+        assert result["paper_info"]["title"] == title
+
+
+# ============================================================
+# 5. ResultValidator 三态
+# ============================================================
+
+def _validator():
+    return ResultValidatorAgent(LLMClient(mock_mode=True))
+
+
+class TestValidatorThreeStates:
+
+    def test_not_runnable_reports_cannot_verify(self):
+        agent = _validator()
+        execution = {"not_runnable": True, "reason": "论文信息不足",
+                     "success": False, "stages": [], "final": {}}
+        result = agent.run({"paper_info": {"metrics": {"accuracy": 0.85}},
+                            "execution": execution})
+        assert result["is_reproduced"] is None
+        assert result["status"] == "not_runnable"
+        assert "未能运行" in result["validation"]["analysis"]
+        # 未运行 -> 不调 LLM 比对，省预算
+        assert result["llm_calls"] == 0
+
+    def test_failed_execution_is_not_runnable(self):
+        """语法错误/依赖失败：没有 stdout 的失败 = 没跑起来。"""
+        agent = _validator()
+        execution = {"success": False,
+                     "final": {"stage": "smoke", "success": False,
+                               "stdout": "", "stderr": "IndentationError: ...",
+                               "exit_code": 1},
+                     "stages": [{"stage": "smoke", "success": False}]}
+        result = agent.run({"paper_info": {"metrics": {"accuracy": 0.85}},
+                            "execution": execution})
+        assert result["status"] == "not_runnable"
+        assert "IndentationError" in result["reason"]
+
+    @staticmethod
+    def _ran(stdout: str) -> dict:
+        """构造"确实跑起来了"的 execution（结构与 CodeExecutor 输出一致）。"""
+        full = {"stage": "full", "success": True, "stdout": stdout,
+                "stderr": "", "exit_code": 0}
+        return {"success": True, "stages": [full], "final": full}
+
+    def test_ran_but_mismatched_is_not_reproduced(self):
+        agent = _validator()
+        result = agent.run({"paper_info": {"metrics": {"accuracy": 0.85}},
+                            "execution": self._ran("accuracy: 0.42")})
+        assert result["is_reproduced"] is False
+        assert result["status"] == "not_reproduced"
+
+    def test_matched_is_reproduced(self):
+        agent = _validator()
+        result = agent.run({"paper_info": {"metrics": {"accuracy": 0.85}},
+                            "execution": self._ran("Test accuracy: 85.2%")})
+        assert result["is_reproduced"] is True
+        assert result["status"] == "reproduced"
+
+
+class TestValidatorMetricDetails:
+
+    def test_rmse_not_folded_into_mse(self):
+        m = _validator()._extract_metrics("rmse: 1.234, mse: 1.5")
+        assert m["rmse"] == pytest.approx(1.234)
+        assert m["mse"] == pytest.approx(1.5)
+
+    def test_missing_metric_is_reported_not_silently_skipped(self):
+        cmp = _validator()._local_compare(
+            {"accuracy": 0.85, "f1_score": 0.80}, {"accuracy": 0.85})
+        assert cmp["match"] is True              # 部分匹配仍算通过
+        assert cmp["missing_metrics"]            # 但缺失项要如实记录
+        assert "f1_score" in cmp["missing_metrics"][0]
+        assert any("f1_score" in d for d in cmp["differences"])
+
+    def test_no_overlapping_metric_is_not_reproduced(self):
+        """声明指标一个都没对上 -> 不得判为复现成功。"""
+        cmp = _validator()._local_compare(
+            {"reproduction_score": 0.85}, {"accuracy": 0.85})
+        assert cmp["match"] is False

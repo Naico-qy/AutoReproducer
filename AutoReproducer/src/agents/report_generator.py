@@ -7,6 +7,14 @@ from datetime import datetime
 from src.base_agent import BaseAgent
 
 
+def _fmt(value, spec: str = ".2f", default: float = 0.0) -> str:
+    """数值格式化：容忍字符串/None 等非数值（LLM 可能把 confidence 填成 "0.1"）。"""
+    try:
+        return format(float(value), spec)
+    except (TypeError, ValueError):
+        return format(float(default), spec)
+
+
 class ReportGeneratorAgent(BaseAgent):
     """生成 Markdown 格式的复现 + 优化报告。"""
 
@@ -51,7 +59,7 @@ class ReportGeneratorAgent(BaseAgent):
         lines += ["## 2. 资源定位",
                   f"- **代码仓库**: {resources.get('code_repo_url', '未找到')}",
                   f"- **数据集**: {resources.get('dataset_url', '未找到')}",
-                  f"- **置信度**: {resources.get('confidence', 0.0):.2f}"]
+                  f"- **置信度**: {_fmt(resources.get('confidence', 0.0))}"]
         urls = resources.get("extracted_urls", []) or []
         if urls:
             lines.append(f"- **从论文中提取URL**: {len(urls)} 个")
@@ -88,8 +96,12 @@ class ReportGeneratorAgent(BaseAgent):
                   f"- **代码长度**: {len(execution.get('code', ''))} 字符"]
         stages = execution.get("stages", []) or []
         final = execution.get("final", {}) or {}
-        lines.append(f"- **执行状态**: "
-                     f"{'✅ 成功' if final.get('success') else '❌ 失败'}")
+        if execution.get("not_runnable"):
+            lines.append("- **执行状态**: ⚠️ 未运行（代码未通过执行前检查）")
+            lines.append(f"- **未运行原因**: {execution.get('reason', 'N/A')}")
+        else:
+            lines.append(f"- **执行状态**: "
+                         f"{'✅ 成功' if final.get('success') else '❌ 失败'}")
         for st in stages:
             st_ok = st.get("success")
             lines.append(
@@ -105,12 +117,22 @@ class ReportGeneratorAgent(BaseAgent):
         lines.append("")
 
         # 5. 验证结果 + 指标对比
+        # 三态：复现成功 / 复现失败 / 无法验证（代码没跑起来，不能算复现失败）
+        if validation.get("status") == "not_runnable":
+            state_text = "⚠️ 无法验证（代码未运行）"
+        elif validation.get("is_reproduced"):
+            state_text = "✅ 成功"
+        else:
+            state_text = "❌ 失败"
         lines += ["## 5. 验证结果",
-                  f"- **复现状态**: "
-                  f"{'✅ 成功' if validation.get('is_reproduced') else '❌ 失败'}",
-                  f"- **置信度**: {validation.get('confidence', 0.0):.2f}",
+                  f"- **复现状态**: {state_text}",
+                  f"- **置信度**: {_fmt(validation.get('confidence', 0.0))}",
                   f"- **分析**: "
                   f"{(validation.get('validation') or {}).get('analysis', '无')}"]
+        missing = (validation.get("validation") or {}).get("missing_metrics") or []
+        if missing:
+            lines.append("- **无法比对的指标**:")
+            lines += [f"  - {m}" for m in missing]
         metrics_comp = validation.get("metrics_comparison", {}) or {}
         if metrics_comp:
             paper_m = metrics_comp.get("paper", {}) or {}

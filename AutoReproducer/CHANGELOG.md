@@ -5,6 +5,60 @@
 
 ---
 
+## [2026.09.10-2] - 2026-09-10
+
+### 修复（复现核心闭环，Batch 1）
+
+- **`_sanitize_code` 抹掉全部缩进（根因修复）**：`src/agents/code_executor.py`
+  语法兜底分支用 `.strip()` 清行，把**所有前导缩进一并删掉**，使「LLM 输出
+  被截断」这个真实原因被伪装成整份代码的 `IndentationError`。改为只清理
+  「行首行号 + 行尾空白」（新增 `_LINE_NO_RE`，行号后最多吃掉一个分隔空白，
+  其余空白是原本的缩进），并在「去行号后不再像代码行」时保留原行避免误删。
+- **语法门 + 再生成**：`src/agents/code_executor.py` 新增 `_produce_code` /
+  `_regenerate_code`。清洗后的代码必须能 `compile`，不通过时按
+  「截断 / 语法错误」把失败原因回灌给 LLM 重新生成（`MAX_CODE_REGEN=2` 次），
+  仍不可编译则短路为**未运行**（`_not_runnable` / `exit_code=-5`），
+  **绝不把残码送进沙箱**。
+- **信息不足不再编造代码**：`src/agents/code_executor.py::_info_insufficient`
+  在论文缺方法/数据集/指标时短路为「无法运行」，不再生成无关占位代码
+  （此前会用 CIFAR-10 CNN 去复现线性回归）；生成提示词新增
+  `# INSUFFICIENT_INFO` 约定，明令禁止用无关数据集充数。
+- **PaperReader 标题-only 诚实降级**：`src/agents/paper_reader.py`
+  - 删除编造的占位摘要（`"摘要: 这是关于《X》的论文,包含方法、实验与指标声明。"`），
+    改为如实标注「未获取到论文正文」并在提示词中要求推断不出时返回
+    `insufficient_info: true`；
+  - 修正 `if paper_title and "：" not in parsed.get("title", "")` 的自相矛盾条件，
+    用户传入的标题一律优先；
+  - 透传 `insufficient_info` / `info_sufficient` 给下游 Agent。
+- **ResultValidator 区分「无法运行」与「复现失败」**：`src/agents/result_validator.py`
+  - 新增三态 `status`：`not_runnable`（`is_reproduced=None`，代码没跑起来）/
+    `not_reproduced` / `reproduced`；未运行时跳过 LLM 比对，省预算；
+  - `mse` 与 `rmse` 不再混键（`_METRIC_PATTERNS` 拆分 + `\b` 词边界，
+    修复 `"rmse: 1.2"` 被 mse 分支抢先命中）；
+  - 声明了但输出中提取不到的指标不再静默跳过，记入 `missing_metrics`
+    并在报告「无法比对的指标」中列出；
+  - 声明指标一个都没对上时不再判为「复现成功」。
+- **报告如实渲染三态**：`src/agents/report_generator.py` 执行状态显示
+  「⚠️ 未运行」及原因，验证状态显示「⚠️ 无法验证（代码未运行）」；
+  新增 `_fmt` 容忍非数值 confidence（此前 `f"{0.1:.2f}"` 对字符串会崩溃）。
+- **优化跳过原因更准确**：`src/orchestrator.py`、`frontend/backend_pipeline.py`
+  区分「代码未能运行，无法优化」与「复现未成功,跳过优化」。
+
+### 变更
+
+- **LLM 截断诊断**：`src/llm/llm_client.py` 记录 `last_finish_reason`
+  （`choices[0].finish_reason`），便于判断截断发生在 API 侧（`length`）
+  还是清洗侧；CodeExecutor 在触发再生成时把该值写入审计日志。
+
+### 测试
+
+- 新增 `tests/test_reproduction_core.py`（21 用例：缩进保留、行号剥离不丢缩进、
+  截断判定、再生成闭环、语法门短路、信息不足短路、PaperReader 诚实降级、
+  Validator 三态、mse/rmse 拆键、缺失指标上报）。
+- 全量 **126 passed, 1 skipped**。
+
+---
+
 ## [2026.09.10-1] - 2026-09-10
 
 ### 新增

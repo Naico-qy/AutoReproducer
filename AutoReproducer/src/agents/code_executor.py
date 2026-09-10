@@ -6,7 +6,12 @@
 - 支持本地子进程（隔离临时目录 + 超时）与 Docker 容器两种沙箱；
 - 本地模式执行前按 env_config 依赖清单自动 pip 安装（幂等缓存 +
   独立超时 + 失败诊断），修复"EnvBuilder 给出依赖但本地执行器直接运行
-  导致 ModuleNotFoundError"缺陷——复现环境与执行环境现在保持一致。
+  导致 ModuleNotFoundError"缺陷——复现环境与执行环境现在保持一致；
+- 执行前语法门：清洗后的代码必须能 compile，不通过则针对"截断/语法
+  错误"再生成（限次），仍不可编译则诚实短路为"未运行"，绝不把残码
+  送进沙箱——避免把"代码被截断"掩盖成沙箱里的 IndentationError；
+- 信息不足时不生成针对性代码，短路为"无法运行"，交由 ResultValidator
+  判定为"无法验证"而非"复现失败"。
 """
 import os
 import re
@@ -30,8 +35,28 @@ LOCAL_PIP_TIMEOUT = 300
 # 失败也缓存，避免反复重装浪费时间。
 _INSTALLED_DEPS: Dict[str, str] = {}
 
+# 代码不可编译时的再生成次数上限（LLM 输出被截断是常见故障）
+MAX_CODE_REGEN = 2
+# 信息不足时 LLM 应按约定返回的标记行（整份"代码"只有这一行注释）
+_INSUFFICIENT_INFO_MARK = "# INSUFFICIENT_INFO"
+# 语法错误信息中提示"输出被截断"的特征词
+_TRUNCATION_HINTS = (
+    "unexpected eof", "eof in multi-line", "unterminated",
+    "was never closed", "unexpected end of",
+)
+# 末尾行以这些字符结尾 -> 语句明显没写完（截断的典型特征）
+_TRUNCATION_TAIL_CHARS = "=*+-([{,:\\"
+# 判定"未知/占位"论文信息用的空值模式（与 PaperReader._UNKNOWN_RE 判据一致）
+_UNKNOWN_RE = re.compile(
+    r"^\s*(|未知.*|未找到|无|n/?a|none|null)\s*$", re.IGNORECASE)
+# Exit code：代码在进入沙箱前就被拦下（信息不足/语法错误）
+EXIT_NOT_RUNNABLE = -5
+
 # markdown 代码块围栏（可能带 python 语言标注）
 _CODE_FENCE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
+# 行首行号（"1 def f(x):" 这类带行号转储）：数字前空白保留，数字后
+# 最多吃掉一个分隔空白，剩下的空白是原本的缩进，必须留给代码。
+_LINE_NO_RE = re.compile(r"^(\s*)\d+[ \t]?")
 # 行首残留的围栏/引号残片
 _FENCE_LEFT = re.compile(r"^\s*(```+|>>>|\.\.\.)\s*", re.MULTILINE)
 # 判定"看起来像 Python 代码行"的行首（\w 会匹配中文,故全部用 ASCII 白名单）
@@ -72,10 +97,25 @@ class CodeExecutorAgent(BaseAgent):
         paper_info = input_data.get("paper_info", {}) or {}
         env_config = input_data.get("env_config", {}) or {}
         code = input_data.get("code", "") or ""
-        if not code:
-            code = self._generate_code(paper_info)
-        code = self._sanitize_code(code)
         self.env_config = env_config  # 供执行阶段选择镜像/依赖
+
+        if code:
+            # 外部提供的真实复现代码：只做清洗，不走生成/再生成
+            code = self._sanitize_code(code)
+        else:
+            # 信息不足时不生成针对性代码，诚实短路（下游判"无法验证"）
+            if self._info_insufficient(paper_info):
+                return self._not_runnable(
+                    "论文信息不足（缺少方法/数据集/指标），无法生成"
+                    "针对性复现代码；请提供完整 PDF 或更完整的摘要", code="")
+            code = self._produce_code(paper_info)
+
+        # 语法门：不可编译的代码绝不进沙箱——残码在沙箱里会被报成
+        # IndentationError 之类，掩盖"输出被截断"这个真实原因。
+        syntax_error = self._syntax_error(code)
+        if syntax_error:
+            return self._not_runnable(
+                f"代码存在语法错误，未执行: {syntax_error}", code=code)
 
         smoke = self._execute_code(code, stage="smoke")
         if not smoke["success"]:
@@ -115,8 +155,29 @@ class CodeExecutorAgent(BaseAgent):
 
     # ---------------- 代码生成 ----------------
 
-    def _generate_code(self, paper_info: Dict) -> str:
-        prompt = f"""根据论文信息生成一段简短的训练代码用于复现实验。
+    def _produce_code(self, paper_info: Dict) -> str:
+        """生成复现代码；语法不通过时针对"截断/语法错误"再生成（限次）。
+
+        返回仍可能是不可编译的代码——由调用方 run() 的语法门统一判定并
+        短路为"未运行"，此处只负责"多试几次"，不负责掩盖失败。
+        """
+        code = self._sanitize_code(self._generate_code(paper_info))
+        for attempt in range(1, MAX_CODE_REGEN + 1):
+            err = self._syntax_error(code)
+            if err is None:
+                return code
+            reason = ("疑似输出被截断" if self._looks_truncated(code, err)
+                      else "语法错误")
+            finish = getattr(self.llm, "last_finish_reason", "")
+            self.log("generate_code", "WARNING",
+                     f"生成代码不可编译（{reason}，第 {attempt} 次）: {err}"
+                     + (f" [finish_reason={finish}]" if finish else ""))
+            code = self._sanitize_code(
+                self._regenerate_code(paper_info, err, attempt))
+        return code
+
+    def _generate_code_prompt(self, paper_info: Dict) -> str:
+        return f"""根据论文信息生成一段简短的训练代码用于复现实验。
 论文方法: {paper_info.get('method', '未知')}
 指标: {paper_info.get('metrics', {})}
 数据集: {paper_info.get('dataset', '未知')}
@@ -127,7 +188,24 @@ class CodeExecutorAgent(BaseAgent):
    说明语句或自然语言段落；
 3. 不要使用 markdown 代码块围栏(``` 或 ```python)包裹输出,不要输出围栏标记；
 4. 如需注释仅使用以 # 开头的 Python 注释；
-5. 第一行直接开始写代码,不要有开场白。
+5. 第一行直接开始写代码,不要有开场白；
+6. 必须输出完整脚本,不要在函数/循环中途停止,每一行都要写完整；
+7. 若上面的论文方法/数据集确实是未知的占位值,无法据此写出针对性代码,
+   则只输出一行 `{_INSUFFICIENT_INFO_MARK}` 并停止,严禁用无关数据集
+   (如 CIFAR-10/IMDB)编造一个与本论文无关的模型来充数。
+"""
+
+    def _generate_code(self, paper_info: Dict) -> str:
+        return self.llm.chat(self._generate_code_prompt(paper_info),
+                             task="code_executor")
+
+    def _regenerate_code(self, paper_info: Dict, err: str, attempt: int) -> str:
+        """再生成：把上一次的失败原因回灌给 LLM，要求输出完整脚本。"""
+        prompt = self._generate_code_prompt(paper_info) + f"""
+【上一次输出不可用 - 第 {attempt} 次重试】
+上一次生成的代码无法通过编译，原因: {err}
+这通常意味着输出被截断了。请重新输出一份**完整**的 Python 脚本：
+每个函数体/循环体都要有正确的缩进，最后一行必须是完整语句。
 """
         return self.llm.chat(prompt, task="code_executor")
 
@@ -176,8 +254,16 @@ class CodeExecutorAgent(BaseAgent):
             code = _FENCE_LEFT.sub("", code)
             lines = []
             for ln in code.splitlines():
-                ln = re.sub(r"^\s*\d+\s+", "", ln).strip()
-                if not ln:
+                # 只清掉行首行号与行尾空白,保留前导缩进——缩进一旦被抹掉,
+                # 函数体/循环体会整体塌陷,把"输出被截断"这个真实原因
+                # 伪装成一个更难定位的 IndentationError。
+                fixed = _LINE_NO_RE.sub(r"\1", ln).rstrip()
+                # 去行号后不像代码行（如续行 "  2)"）时保留原行,避免误删
+                if not _CODE_LINE_START.match(fixed) \
+                        and _CODE_LINE_START.match(ln.rstrip()):
+                    fixed = ln.rstrip()
+                ln = fixed
+                if not ln.strip():
                     continue
                 if (_CODE_LINE_START.match(ln)
                         and not (re.search(r"[\u4e00-\u9fff]", ln)
@@ -185,6 +271,66 @@ class CodeExecutorAgent(BaseAgent):
                     lines.append(ln)
             code = "\n".join(lines)
         return code
+
+    # ---------------- 执行前检查 ----------------
+
+    @staticmethod
+    def _syntax_error(code: str) -> Optional[str]:
+        """编译检查：语法错误返回可读信息，通过则返回 None。"""
+        if not code or not code.strip():
+            return "代码为空"
+        try:
+            compile(code, "<generated>", "exec")
+            return None
+        except SyntaxError as e:
+            return f"{e.msg} (line {e.lineno})"
+        except ValueError as e:      # 源码含空字节等
+            return str(e)
+
+    @staticmethod
+    def _looks_truncated(code: str, err: str) -> bool:
+        """判断语法错误是否更像"输出被截断"而非"模型写错了语法"。"""
+        if any(h in err.lower() for h in _TRUNCATION_HINTS):
+            return True
+        tail = next((ln.strip() for ln in reversed(code.splitlines())
+                     if ln.strip()), "")
+        return bool(tail) and tail[-1] in _TRUNCATION_TAIL_CHARS
+
+    @staticmethod
+    def _info_insufficient(paper_info: Dict) -> bool:
+        """论文结构化信息是否不足以生成针对性复现代码。
+
+        判据：解析层显式标记 info_sufficient=False / insufficient_info，
+        或方法与数据集双双缺失/为占位值。缺方法必不足以写代码；缺数据集
+        但给出了声明指标时仍可尝试（例如纯数学/合成数据的方法）。
+        """
+        if paper_info.get("info_sufficient") is False:
+            return True
+        if paper_info.get("insufficient_info") is True:
+            return True
+        method = str(paper_info.get("method", "") or "")
+        dataset = str(paper_info.get("dataset", "") or "")
+        metrics = paper_info.get("metrics") or {}
+        return bool(_UNKNOWN_RE.match(method) and _UNKNOWN_RE.match(dataset)
+                    and not metrics)
+
+    def _not_runnable(self, reason: str, code: str) -> dict:
+        """代码未进入执行阶段（信息不足/语法错误）时的统一返回。
+
+        与"跑了但失败"区分：exit_code=EXIT_NOT_RUNNABLE 且带 not_runnable
+        标记，供 ResultValidator 判为"无法验证"而非"复现失败"。
+        """
+        stage = {"stage": "precheck", "success": False, "stdout": "",
+                 "stderr": reason, "exit_code": EXIT_NOT_RUNNABLE,
+                 "not_runnable": True}
+        self.log_experiment(
+            "EXECUTE_CODE", "代码未通过执行前检查,未进入沙箱",
+            inputs={"code": code}, outputs=stage, result={"success": False})
+        self.log("execute_code", "ERROR", f"代码未运行: {reason}",
+                 {"exit_code": EXIT_NOT_RUNNABLE, "not_runnable": True})
+        return {"stages": [stage], "success": False, "final": stage,
+                "code": code, "not_runnable": True, "reason": reason,
+                "llm_calls": self._delta_llm_calls()}
 
     # ---------------- 执行 ----------------
 

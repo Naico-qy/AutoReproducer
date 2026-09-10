@@ -168,8 +168,9 @@ class Orchestrator:
                 except Exception as e:
                     self._fail("OPTIMIZING", str(e))
             else:
-                self.data["optimization"] = {"optimized": False,
-                                             "reason": "复现未成功,跳过优化"}
+                self.data["optimization"] = {
+                    "optimized": False,
+                    "reason": self._optimization_skip_reason()}
 
         # 报告生成（合并复现 + 优化）
         if self.state != "ERROR":
@@ -204,6 +205,13 @@ class Orchestrator:
             self.data["execution"] = result
         elif state_name == "VALIDATE":
             self.data["validation"] = result
+
+    def _optimization_skip_reason(self) -> str:
+        """优化未触发的原因（区分"复现失败"与"压根没跑起来"）。"""
+        validation = self.data.get("validation", {}) or {}
+        if validation.get("status") == "not_runnable":
+            return f"代码未能运行，无法优化（{validation.get('reason', '未运行')}）"
+        return "复现未成功,跳过优化"
 
     def _materialize_workspace(self, code: str) -> None:
         """把复现代码写入优化工作区（run.py），供真实优化闭环使用。"""

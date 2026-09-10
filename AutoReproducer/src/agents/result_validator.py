@@ -12,13 +12,16 @@ from src.base_agent import BaseAgent
 from src.llm.llm_client import LLMClient
 
 # 指标提取模式：键名 -> 输出中的统一指标名
+# 注意 rmse 必须排在 mse 之前，否则 "rmse: 1.2" 会被 mse 分支抢先匹配
 _METRIC_PATTERNS = [
     (r"(?:accuracy|acc|精确率|准确率|测试集准确率)\s*[:：=]?\s*([\d.]+)\s*%?", "accuracy"),
     (r"(?:f1[_-]?score|f1)\s*[:：=]?\s*([\d.]+)", "f1_score"),
     (r"(?:precision|精确率)\s*[:：=]?\s*([\d.]+)\s*%?", "precision"),
     (r"(?:recall|召回率)\s*[:：=]?\s*([\d.]+)\s*%?", "recall"),
     (r"(?:loss|损失)\s*[:：=]?\s*([\d.]+)", "loss"),
-    (r"(?:mse|rmse)\s*[:：=]?\s*([\d.]+)", "mse"),
+    # \b 不可省：否则 "rmse: 1.2" 里的 "mse" 会被下面的 mse 分支抢先命中
+    (r"\b(?:rmse|root[_\s]?mean[_\s]?squared[_\s]?error)\s*[:：=]?\s*([\d.]+)", "rmse"),
+    (r"\b(?:mse|mean[_\s]?squared[_\s]?error)\s*[:：=]?\s*([\d.]+)", "mse"),
 ]
 # 复现成功判定的相对差异阈值
 _TOLERANCE = 0.05
@@ -60,6 +63,28 @@ class ResultValidatorAgent(BaseAgent):
             if score is not None:
                 paper_metrics = {"reproduction_score": round(float(score), 4)}
 
+        # 代码根本没跑起来（信息不足/语法错误被前置拦截，或沙箱启动即失败）
+        # -> "无法验证"，不能报成"复现失败"——后者会误导用户以为方法不对。
+        not_runnable = self._detect_not_runnable(execution, stdout)
+        if not_runnable:
+            reason = f"代码未能运行，无法与论文声明比对（原因：{not_runnable}）"
+            self.log_experiment(
+                "VALIDATE", "代码未运行,跳过指标比对",
+                inputs={"execution_stage": (execution.get("final") or {}).get("stage")},
+                outputs={"status": "not_runnable"},
+                result={"is_reproduced": None, "reason": not_runnable})
+            self.log("validate", "WARNING", reason)
+            return {
+                "validation": {"match": None, "differences": [],
+                               "confidence": 0.0, "analysis": reason},
+                "metrics_comparison": {"paper": paper_metrics, "actual": {}},
+                "is_reproduced": None,
+                "status": "not_runnable",
+                "reason": not_runnable,
+                "confidence": 0.0,
+                "llm_calls": self._delta_llm_calls(),
+            }
+
         actual_metrics = self._extract_metrics(stdout)
 
         # LLM 比对 + 本地数值校验兜底
@@ -92,6 +117,7 @@ class ResultValidatorAgent(BaseAgent):
             "validation": {**parsed, "match": match},
             "metrics_comparison": {"paper": paper_metrics, "actual": actual_metrics},
             "is_reproduced": match,
+            "status": "reproduced" if match else "not_reproduced",
             "confidence": round(float(parsed.get("confidence", 0.0)), 4),
         }
 
@@ -110,6 +136,24 @@ class ResultValidatorAgent(BaseAgent):
 
     # ---------------- 内部工具 ----------------
 
+    @staticmethod
+    def _detect_not_runnable(execution: Dict, stdout: str) -> str:
+        """判断执行是否"压根没跑起来"；是则返回原因文本，否则返回 ""。
+
+        与"跑起来了但结果不符"区分：只有前者才应报"无法验证"。判据：
+        1. CodeExecutor 前置检查拦下（not_runnable 标记 / exit_code=-5）；
+        2. 最终阶段失败且没有任何 stdout（依赖装不上、语法错误、超时等）。
+        """
+        if execution.get("not_runnable"):
+            return (execution.get("reason") or "代码未进入执行阶段").strip()
+        final = execution.get("final") or {}
+        if final.get("not_runnable"):
+            return (final.get("stderr") or "代码未进入执行阶段").strip()
+        if final and not final.get("success") and not (stdout or "").strip():
+            detail = (final.get("stderr") or "").strip()
+            return (detail[:200] if detail else "执行未产出任何输出")
+        return ""
+
     def _local_compare(self, paper_metrics: Dict, actual_metrics: Dict) -> Dict:
         """本地规则比对：同键指标相对差异 <= 5% 视为匹配。"""
         if not paper_metrics:
@@ -120,11 +164,12 @@ class ResultValidatorAgent(BaseAgent):
             return {"match": False, "differences": ["论文声明指标但运行输出未提取到数值"],
                     "confidence": 0.3, "analysis": "运行输出缺少可解析的数值指标"}
 
-        differences = []
+        differences, missing = [], []
         match_all = True
+        matched = 0
         for key, declared in paper_metrics.items():
             try:
-                declared = float(declared)
+                declared_num = float(declared)
             except (TypeError, ValueError):
                 continue
             actual = None
@@ -136,23 +181,34 @@ class ResultValidatorAgent(BaseAgent):
                         actual = None
                     break
             if actual is None:
-                # 尽量与语料的 reproduction_score 对齐
+                # 声明了但输出里没提取到：如实记为"无法比对"（不再静默跳过）
+                missing.append(
+                    f"{key}: 论文声明 {declared_num:g}，运行输出未提取到该指标")
                 continue
+            matched += 1
             # 口径统一：一方为小数(0~1)、另一方为百分数(>=10)时,归一到小数再比对
-            declared_raw, actual_raw = declared, actual
-            if declared <= 1.0 and actual >= 10.0:
+            declared_raw, actual_raw = declared_num, actual
+            if declared_num <= 1.0 and actual >= 10.0:
                 actual = actual / 100.0
-            elif declared >= 10.0 and actual <= 1.0:
-                declared = declared / 100.0
-            diff = abs(actual - declared) / max(abs(declared), 1e-9)
+            elif declared_num >= 10.0 and actual <= 1.0:
+                declared_num = declared_num / 100.0
+            diff = abs(actual - declared_num) / max(abs(declared_num), 1e-9)
             if diff > _TOLERANCE:
                 match_all = False
             differences.append(
                 f"{key}: 声明 {declared_raw:g} vs 实际 {actual_raw:g} "
                 f"(归一化后相对差异 {diff:.1%})")
+
+        if matched == 0:
+            # 声明指标一个都没对上 -> 不是"复现成功",而是数据对不上号
+            match_all = False
+        differences += missing
         return {"match": match_all, "differences": differences,
+                "missing_metrics": missing,
                 "confidence": 0.8 if match_all else 0.4,
-                "analysis": "本地数值比对完成"}
+                "analysis": ("本地数值比对完成"
+                             + (f"；{len(missing)} 个声明指标未提取到" if missing
+                                else ""))}
 
     def _extract_metrics(self, text: str) -> Dict:
         """从输出文本中提取指标数值。"""

@@ -227,8 +227,13 @@ def run_pipeline_core(progress_path: str,
                 _set_current("ERROR")
                 _emit_state(store, "ERROR", OPTIMIZER_NAME, "error")
         else:
-            data["optimization"] = {"optimized": False,
-                                    "reason": "复现未成功,跳过优化"}
+            validation = data.get("validation", {}) or {}
+            if validation.get("status") == "not_runnable":
+                reason = ("代码未能运行，无法优化（"
+                          f"{validation.get('reason', '未运行')}）")
+            else:
+                reason = "复现未成功,跳过优化"
+            data["optimization"] = {"optimized": False, "reason": reason}
             _emit_state(store, _current(), OPTIMIZER_NAME, "waiting")
         for entry in logger.get_summary():
             store.emit({"type": "log", "log": entry})

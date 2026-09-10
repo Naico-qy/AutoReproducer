@@ -20,6 +20,10 @@ class PaperReaderAgent(BaseAgent):
 
     # LLM 输出中可能包裹 JSON 的常见噪音
     _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+    # 判定字段是否为空/占位值（"未知""N/A" 及其变体，如
+    # "未知（LLM 不可用时本地降级提取）"），与 CodeExecutor 的判据一致
+    _UNKNOWN_RE = re.compile(
+        r"^\s*(|未知.*|未找到|无|n/?a|none|null)\s*$", re.IGNORECASE)
 
     def __init__(self, llm_client: LLMClient, logger=None):
         super().__init__("PaperReader", logger)
@@ -41,10 +45,12 @@ class PaperReaderAgent(BaseAgent):
         if pdf_path and Path(pdf_path).exists():
             pdf_text = self._extract_text(pdf_path)
 
-        if not pdf_text and paper_title:
+        # 标题-only：如实标注"没有正文"，绝不编造摘要。编造出来的占位摘要
+        # 会被下游当成真实论文信息，进而生成与论文无关的代码。
+        title_only = not pdf_text and bool(paper_title)
+        if title_only:
             pdf_text = (f"论文标题: {paper_title}\n"
-                        "摘要: 这是关于《" + paper_title + "》的论文,"
-                        "包含方法、实验与指标声明。")
+                        "（未获取到论文正文，以下仅有标题）")
 
         prompt = f"""请从以下论文内容中提取结构化信息，返回JSON格式：
 {{
@@ -54,8 +60,15 @@ class PaperReaderAgent(BaseAgent):
     "dependencies": ["依赖库列表"],
     "metrics": {{"指标名": 数值}},
     "dataset": "数据集名称",
-    "code_url": "代码仓库URL或'未找到'"
+    "code_url": "代码仓库URL或'未找到'",
+    "insufficient_info": false
 }}
+
+【信息不足时的处理 - 必须严格遵守】
+若上面只有标题、没有正文摘要，只做**保守**推断：标题里明确写出的
+方法/领域可以填写；推断不出的字段一律留空（method/dataset 填 ""、
+metrics 填 {{}}），并把 "insufficient_info" 设为 true。
+严禁编造摘要、数据集、指标数值等任何未经证实的信息。
 
 论文内容：
 {pdf_text[:3000]}
@@ -66,8 +79,14 @@ class PaperReaderAgent(BaseAgent):
             parsed = self._fallback_extract(pdf_text, paper_title)
 
         # 用户显式传入标题时，以用户输入为准（忠实于输入）
-        if paper_title and "：" not in parsed.get("title", ""):
+        if paper_title:
             parsed["title"] = paper_title
+        # 透传"信息是否足以生成针对性复现代码"给下游
+        # （CodeExecutor 据此拒绝编造代码，ResultValidator 据此判"无法验证"）
+        if not isinstance(parsed.get("insufficient_info"), bool):
+            parsed["insufficient_info"] = self._judge_insufficient(
+                parsed, title_only)
+        parsed["info_sufficient"] = not parsed["insufficient_info"]
 
         self.log_experiment(
             "READ_PAPER", "解析论文并生成结构化信息（真相来源）",
@@ -91,6 +110,21 @@ class PaperReaderAgent(BaseAgent):
         delta = total - getattr(self, "_last_call_count", 0)
         self._last_call_count = total
         return max(delta, 0)
+
+    @classmethod
+    def _judge_insufficient(cls, parsed: Dict, title_only: bool) -> bool:
+        """本地判定：这份结构化信息是否足以生成针对性复现代码。
+
+        方法、数据集、声明指标三者皆空 -> 信息不足。此时下游不应编造
+        代码，而应诚实报"无法复现"。
+        """
+        method = str(parsed.get("method", "") or "")
+        dataset = str(parsed.get("dataset", "") or "")
+        metrics = parsed.get("metrics") or {}
+        if title_only and not method.strip():
+            return True      # 只有标题，且连方法都没推断出来
+        return bool(cls._UNKNOWN_RE.match(method)
+                    and cls._UNKNOWN_RE.match(dataset) and not metrics)
 
     def _parse_json(self, text: str) -> Dict:
         """宽容解析 LLM 返回的 JSON（容忍代码围栏与首尾噪音）。"""

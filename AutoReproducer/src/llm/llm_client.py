@@ -123,6 +123,9 @@ class LLMClient:
         self.timeout = timeout or _env_int("LLM_TIMEOUT", 120)
         self.mock_mode = mock_mode
         self.call_count = 0
+        # 最近一次真实调用的 finish_reason（"stop"/"length"/...）。
+        # 供上层诊断"输出被截断"——"length"表示撞到 max_tokens。
+        self.last_finish_reason = ""
 
     def chat(self, prompt: str, system_prompt: str = "",
              temperature: float = 0.3, task: str = "") -> str:
@@ -182,7 +185,10 @@ class LLMClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 try:
-                    return result["choices"][0]["message"]["content"] or ""
+                    choice = result["choices"][0]
+                    # 记录 finish_reason，便于上层判断输出是否被 max_tokens 截断
+                    self.last_finish_reason = str(choice.get("finish_reason") or "")
+                    return choice["message"]["content"] or ""
                 except (KeyError, IndexError, TypeError):
                     return f"[LLM API Error: 响应缺少 choices[0].message.content: {json.dumps(result, ensure_ascii=False)[:200]}]"
         except urllib.error.HTTPError as e:
