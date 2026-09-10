@@ -9,8 +9,9 @@
 3. 预算统计：汇总 LLM 调用次数，纳入审计统计与报告。
 """
 from typing import Any, Dict, Optional
+from pathlib import Path
 from src.audit.audit_logger import AuditLogger
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 from src.agents.paper_reader import PaperReaderAgent
 from src.agents.resource_finder import ResourceFinderAgent
 from src.agents.env_builder import EnvBuilderAgent
@@ -19,6 +20,7 @@ from src.agents.result_validator import ResultValidatorAgent
 from src.agents.report_generator import ReportGeneratorAgent
 from src.agents.verifier import VerifierAgent
 from src.agents.optimizer import OptimizerAgent
+from src.optimizer.real_simulator import RealSimulator
 
 # 每步验证失败时最多触发的修正重试次数（预算约束）
 MAX_FIX_RETRIES = 1
@@ -40,12 +42,16 @@ class Orchestrator:
 
     def __init__(self, llm_client: Optional[LLMClient] = None,
                  mock_mode: bool = True, logger: Optional[AuditLogger] = None,
-                 max_trials: int = 10, use_docker: bool = False):
+                 max_trials: int = 10, use_docker: bool = False,
+                 workspace_dir: Optional[str] = None):
         self.state = "INIT"
         self.logger = logger or AuditLogger()
         self.llm = llm_client or LLMClient(mock_mode=mock_mode)
         self.max_trials = max_trials
         self.use_docker = use_docker
+        # 优化工作区:提供时启用 Optimizer 真实执行闭环(补丁 -> 白名单 ->
+        # 快照 -> 重跑 -> 真实指标 -> Keep/Reject);缺省保持哈希模拟。
+        self.workspace_dir = workspace_dir
 
         # 初始化所有 Agent
         self.agents: Dict[str, Any] = {
@@ -60,6 +66,11 @@ class Orchestrator:
                                         max_trials=self.max_trials),
             "reporter": ReportGeneratorAgent(self.logger),
         }
+        # 真实优化闭环:注入真实执行器(替代默认哈希模拟)
+        if self.workspace_dir:
+            self.agents["optimizer"].simulator = RealSimulator(
+                llm=self.llm, executor=self.agents["executor"],
+                workspace_dir=self.workspace_dir, logger=self.logger)
 
         self.data: Dict[str, Any] = {}
         self.error: Optional[str] = None
@@ -121,6 +132,13 @@ class Orchestrator:
                             {"error": build_res.get("error") or
                                       (build_res.get("stderr") or "")[-300:]})
 
+                # 真实优化工作区：把复现代码物化到磁盘，
+                # 供 Optimizer 真实执行器快照/补丁/重跑
+                if state_name == "EXECUTE_CODE" and self.workspace_dir:
+                    code = (result or {}).get("code", "") or \
+                        self.data.get("execution", {}).get("code", "")
+                    self._materialize_workspace(code)
+
                 # Prompt-Free 验证 + 修正闭环
                 self._verify_step(state_name, agent, result)
 
@@ -137,6 +155,10 @@ class Orchestrator:
                 self.logger.log("Orchestrator", "enter_OPTIMIZING", "RUNNING",
                                 "进入优化阶段")
                 try:
+                    # 真实优化:把论文指标键绑定到执行器(奖励方向与对齐依据)
+                    sim = getattr(self.agents["optimizer"], "simulator", None)
+                    if isinstance(sim, RealSimulator):
+                        sim.bind_paper(self.data.get("paper_info") or {})
                     opt_result = self.agents["optimizer"].run(self.data)
                     self.data["optimization"] = opt_result
                     self._accumulate_llm_calls(opt_result)
@@ -152,7 +174,7 @@ class Orchestrator:
         # 报告生成（合并复现 + 优化）
         if self.state != "ERROR":
             self.state = "GENERATE_REPORT"
-            self.data["audit_summary"] = self.logger.get_stats()
+            self.data["audit_stats"] = self.logger.get_stats()
             try:
                 self.data["report"] = self.agents["reporter"].run(self.data) \
                     .get("report", "")
@@ -161,9 +183,9 @@ class Orchestrator:
 
         if self.state != "ERROR":
             self.state = "COMPLETED"
-            self.data["audit_summary"] = self.logger.get_stats()
+            self.data["audit_stats"] = self.logger.get_stats()
             self.logger.log("Orchestrator", "finish_pipeline", "SUCCESS",
-                            "流水线完成", self.data.get("audit_summary"))
+                            "流水线完成", self.data.get("audit_stats"))
 
         return self.get_result()
 
@@ -182,6 +204,18 @@ class Orchestrator:
             self.data["execution"] = result
         elif state_name == "VALIDATE":
             self.data["validation"] = result
+
+    def _materialize_workspace(self, code: str) -> None:
+        """把复现代码写入优化工作区（run.py），供真实优化闭环使用。"""
+        if not code or not code.strip() or not self.workspace_dir:
+            self.logger.log("Orchestrator", "materialize_workspace", "WARNING",
+                            "无可用代码或未配置工作区,不落盘")
+            return
+        ws = Path(self.workspace_dir)
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "run.py").write_text(code, encoding="utf-8")
+        self.logger.log("Orchestrator", "materialize_workspace", "SUCCESS",
+                        f"复现代码已物化到工作区: {ws / 'run.py'}")
 
     def _verify_step(self, state_name: str, agent, result: dict) -> None:
         """Prompt-Free 验证某步输出；未通过时按修正建议触发一次修正重试。"""

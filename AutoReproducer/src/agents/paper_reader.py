@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Dict
 from src.base_agent import BaseAgent
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 
 
 class PaperReaderAgent(BaseAgent):

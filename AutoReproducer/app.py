@@ -3,12 +3,14 @@
 修复与增强：
 - 论文标题 / 上传 PDF 正确传递到 PaperReader；
 - 侧边栏 LLM API 配置（OpenAI 兼容端点 / Key / 模型）真实生效；
-- 展示优化结果（最优方向/改进幅度）与 LLM 预算统计。
+- 展示优化结果（最优方向/改进幅度）与 LLM 预算统计；
+- 复现流水线后台线程执行，前端轮询进度文件实时展示当前阶段
+  （OpenAI 兼容端点 / Key / 模型真实生效）。
 """
 import os
 import sys
-import time
 import tempfile
+import time
 
 import streamlit as st
 
@@ -16,9 +18,32 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.orchestrator import Orchestrator
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 from src.audit.audit_logger import AuditLogger
 from src.corpus import list_papers
+from frontend.llm_config import (
+    resolve_llm_config,
+    config_missing,
+    test_llm_connection,
+)
+from frontend.backend_pipeline import (
+    AGENTS,
+    ProgressStore,
+    run_pipeline_background,
+)
+from frontend.history_manager import (
+    list_sessions,
+    get_storage_stats,
+    cleanup_runtime,
+    format_size,
+    get_session_detail,
+)
+
+# 页面自动刷新（可选依赖）：未安装时退化为手动刷新
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 # 页面配置
 st.set_page_config(
@@ -76,6 +101,12 @@ if "mock_mode" not in st.session_state:
     st.session_state.mock_mode = True
 if "paper_title" not in st.session_state:
     st.session_state.paper_title = ""
+if "connection_result" not in st.session_state:
+    st.session_state.connection_result = None
+if "progress_file" not in st.session_state:
+    st.session_state.progress_file = None
+if "pipeline_note" not in st.session_state:
+    st.session_state.pipeline_note = None
 
 
 # ========== 侧边栏 ==========
@@ -93,8 +124,8 @@ with st.sidebar:
     with st.expander("🔗 LLM API 配置", expanded=not st.session_state.mock_mode):
         base_url = st.text_input(
             "API 地址（OpenAI 兼容）",
-            value=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
-            placeholder="如 https://api.deepseek.com/v1",
+            value=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com"),
+            placeholder="如 https://api.deepseek.com",
             help="支持 DeepSeek / 千帆 / OpenAI 等任意 OpenAI 兼容端点",
             disabled=st.session_state.mock_mode)
         api_key = st.text_input(
@@ -108,6 +139,28 @@ with st.sidebar:
             value=os.environ.get("LLM_MODEL", "deepseek-chat"),
             placeholder="如 deepseek-chat / ernie-4.0-8k / gpt-4o-mini",
             disabled=st.session_state.mock_mode)
+
+        # 连接测试：真实调用一次 Chat Completions，验证 API 配置可用
+        st.markdown("---")
+        link_btn = st.button(
+            "🔌 测试 AI 连接",
+            disabled=st.session_state.mock_mode,
+            use_container_width=True,
+            help="真实调用一次 LLM API，验证地址/Key/模型配置可用")
+        if st.session_state.mock_mode:
+            st.caption("🧪 Mock 模式不调用真实 LLM，连接测试不可用；"
+                       "关闭 Mock 开关后可输入 API 并测试")
+        else:
+            _cfg = resolve_llm_config(base_url, api_key, model_name)
+            st.caption(f"当前生效: `{_cfg['model']}` @ `{_cfg['base_url']}`"
+                       "（输入留空时回退环境变量）")
+            _cr = st.session_state.connection_result
+            if _cr:
+                ok, msg = _cr
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
     # 预算上限
     max_trials = st.slider(
@@ -170,27 +223,57 @@ st.markdown('<p class="sub-title">基于多智能体协作的论文自动复现�
             unsafe_allow_html=True)
 
 # 标签页
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📋 流水线状态", "📄 复现报告", "📜 审计日志", "🔍 状态机",
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📋 流水线状态", "📄 复现报告", "📜 审计日志", "🔍 状态机", "📂 历史记录",
 ])
 
 # ===== Tab 1: 流水线状态 =====
 with tab1:
     st.markdown("### 🏗️ 复现流水线（复现 -> 验证 -> 优化 -> 报告）")
 
-    AGENTS = [
-        ("📖 PaperReader", "论文解析", "从PDF/标题中提取结构化信息"),
-        ("🔍 ResourceFinder", "资源查找", "定位代码仓库和数据集"),
-        ("🔧 EnvBuilder", "环境构建", "自动搭建环境 + 依赖诊断"),
-        ("⚡ CodeExecutor", "代码执行", "smoke + full 双阶段执行"),
-        ("✅ ResultValidator", "结果验证", "比对论文声明值与运行结果"),
-        ("🛡️ Verifier", "质量验证", "Prompt-Free 检查质量 + 修正闭环"),
-        ("🧪 Optimizer", "智能优化", "UCB 预算调度, Keep/Reject"),
-        ("📝 ReportGenerator", "报告生成", "生成复现+优化 Markdown 报告"),
-    ]
+    AGENT_DESC = {
+        "📖 PaperReader": ("论文解析", "从PDF/标题中提取结构化信息"),
+        "🔍 ResourceFinder": ("资源查找", "定位代码仓库和数据集"),
+        "🔧 EnvBuilder": ("环境构建", "自动搭建环境 + 依赖诊断"),
+        "⚡ CodeExecutor": ("代码执行", "smoke + full 双阶段执行"),
+        "✅ ResultValidator": ("结果验证", "比对论文声明值与运行结果"),
+        "🛡️ Verifier": ("质量验证", "Prompt-Free 检查质量 + 修正闭环"),
+        "🧪 Optimizer": ("智能优化", "UCB 预算调度, Keep/Reject"),
+        "📝 ReportGenerator": ("报告生成", "生成复现+优化 Markdown 报告"),
+    }
+    names = [a[1] for a in AGENTS] + ["🛡️ Verifier", "🧪 Optimizer",
+                                      "📝 ReportGenerator"]
+
+    # ---------- 后台复现实时进度（轮询进度文件） ----------
+    pf = st.session_state.progress_file
+    snap = None
+    if pf:
+        snap = ProgressStore.read_snapshot(pf)
+    if snap:
+        if snap["result"]:
+            st.session_state.result = snap["result"]
+            st.session_state.running = False
+        if snap.get("agent_status"):
+            for k, v in snap["agent_status"].items():
+                st.session_state.agent_status[k] = v
+        if snap.get("state"):
+            st.session_state.current_state = snap["state"]
+        if snap.get("logs"):
+            st.session_state.logs = snap["logs"]
+        if snap.get("error"):
+            st.error(f"❌ 后台流水线异常: {snap['error']}")
+
+    if st.session_state.running and pf:
+        if st_autorefresh is not None:
+            st_autorefresh(interval=2000, key=f"ar_{pf}")
+            st.info("🔄 复现流水线正在后台运行，页面每 2 秒自动刷新，"
+                    "实时展示各 Agent 进度。")
+        else:
+            st.warning("未安装 streamlit-autorefresh，页面不会自动刷新；"
+                       "可刷新浏览器页面查看最新进度。")
 
     cols = st.columns(3)
-    for i, (name, title, desc) in enumerate(AGENTS):
+    for i, name in enumerate(names):
         with cols[i % 3]:
             status = st.session_state.agent_status.get(name, "waiting")
             status_icons = {"success": "✅", "error": "❌",
@@ -203,6 +286,7 @@ with tab1:
             }
             icon = status_icons.get(status, "⏳")
             border = status_colors.get(status, "")
+            title, desc = AGENT_DESC.get(name, ("", ""))
             st.markdown(f"""
             <div class="agent-card" style="{border}">
                 <h4>{icon} {name}</h4>
@@ -211,11 +295,10 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-    agent_order = [a[0] for a in AGENTS]
-    completed = sum(1 for a in agent_order
+    completed = sum(1 for a in names
                     if st.session_state.agent_status.get(a) == "success")
-    progress = completed / len(agent_order) if agent_order else 0
-    st.progress(progress, text=f"整体进度: {completed}/{len(agent_order)}")
+    progress = completed / len(names) if names else 0
+    st.progress(progress, text=f"整体进度: {completed}/{len(names)}")
 
     # 运行结果展示
     if st.session_state.result:
@@ -338,6 +421,104 @@ stateDiagram-v2
     st.table(state_data)
 
 
+# ===== Tab 5: 历史记录 =====
+with tab5:
+    st.markdown("### 📂 复现历史与存储管理")
+
+    # -- 当前会话报告下载（如果本次复现已完成） --
+    if st.session_state.result and st.session_state.result.get("report_path"):
+        rp = st.session_state.result["report_path"]
+        if os.path.exists(rp):
+            with open(rp, "r", encoding="utf-8") as fh:
+                report_content = fh.read()
+            st.download_button(
+                "⬇️ 下载本次复现报告",
+                data=report_content,
+                file_name=os.path.basename(rp),
+                mime="text/markdown",
+                use_container_width=True,
+            )
+
+    # -- 存储仪表板 --
+    st.markdown("#### 💾 存储占用")
+    try:
+        storage = get_storage_stats()
+        cols = st.columns(3)
+        metrics = [
+            ("实验账本", "experiment_ledger"),
+            ("审计日志", "logs"),
+            ("实时进度", "runtime"),
+            ("复现报告", "reports"),
+            ("优化产物", "optimization_demo"),
+            ("其他", "pinn-output"),
+        ]
+        for i, (label, key) in enumerate(metrics):
+            with cols[i % 3]:
+                info = storage.get(key, {"files": 0, "bytes": 0})
+                st.metric(label, f"{info['files']} 文件", format_size(info["bytes"]))
+        st.caption(f"总计: {format_size(storage.get('total', {}).get('bytes', 0))}")
+    except Exception as e:
+        st.error(f"获取存储统计失败: {e}")
+
+    # -- 一键清理 --
+    with st.expander("🧹 清理管理"):
+        keep_days = st.slider("保留 runtime 文件天数", 1, 30, 7)
+        if st.button("清理过期 runtime 文件", use_container_width=True):
+            removed, freed = cleanup_runtime(keep_days=keep_days)
+            st.success(f"已删除 {removed} 个文件，释放 {format_size(freed)}")
+            st.rerun()
+
+    # -- 历史会话列表 --
+    st.markdown("#### 📋 历史复现会话")
+    try:
+        sessions = list_sessions()
+        if not sessions:
+            st.info("暂无历史复现记录。完成一次复现后将在此展示。")
+        else:
+            for sess in sessions:
+                sid = sess["session_id"]
+                title = sess.get("paper_title", "未知论文")
+                state = sess.get("state", "未知")
+                state_icon = {"COMPLETED": "✅", "ERROR": "❌"}.get(state, "⏳")
+                duration = sess.get("duration_sec", 0)
+                llm_calls = sess.get("llm_calls", 0)
+                log_entries = sess.get("log_entries", 0)
+                report_path = sess.get("report_path", "")
+
+                with st.expander(f"{state_icon} [{sid}] {title[:40] or '无标题'}..."):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("状态", state)
+                    c2.metric("耗时", f"{duration:.1f}s")
+                    c3.metric("LLM调用", llm_calls)
+                    st.caption(f"日志条目: {log_entries}")
+
+                    # 报告下载
+                    if report_path and os.path.exists(report_path):
+                        with open(report_path, "r", encoding="utf-8") as fh:
+                            report_data = fh.read()
+                        st.download_button(
+                            "⬇️ 下载报告",
+                            data=report_data,
+                            file_name=os.path.basename(report_path),
+                            mime="text/markdown",
+                            key=f"dl_{sid}",
+                        )
+                    else:
+                        st.caption("无报告文件")
+
+                    # 详情按钮
+                    if st.button("查看详情", key=f"detail_{sid}"):
+                        detail = get_session_detail(sid)
+                        if detail:
+                            st.markdown("**审计日志片段（最近5条）:**")
+                            for entry in detail.get("logs", [])[-5:]:
+                                st.json(entry)
+                        else:
+                            st.warning("未找到详情")
+    except Exception as e:
+        st.error(f"加载历史记录失败: {e}")
+
+
 # ========== 事件处理 ==========
 def _save_uploaded_pdf(uploaded_file) -> str:
     """将上传的 PDF 保存为临时文件，返回路径。"""
@@ -348,166 +529,54 @@ def _save_uploaded_pdf(uploaded_file) -> str:
     return tmp_path
 
 
-def run_pipeline(paper_title="", pdf_path="", corpus_paper=None,
-                 model_name="", base_url="", api_key="",
-                 mock_mode=True, max_trials=10):
-    """运行完整复现流水线（复现 -> 验证 -> 优化 -> 报告）。
-
-    model_name/base_url/api_key 缺省时从环境变量 LLM_MODEL / LLM_BASE_URL /
-    LLM_API_KEY 读取（客户端内部处理），因此真实模式无需本地 LLM 部署。
-    """
-    st.session_state.running = True
-    st.session_state.logs = []
-    st.session_state.agent_status = {}
-
-    logger = AuditLogger()
-    llm = LLMClient(
-        mock_mode=mock_mode,
-        model="" if mock_mode else model_name,
-        base_url=base_url,
-        api_key=api_key,
-    )
-    orchestrator = Orchestrator(llm_client=llm, mock_mode=mock_mode,
-                                logger=logger, max_trials=max_trials)
-    st.session_state.orchestrator = orchestrator
-
-    # 修复：paper_title / pdf_path 现在会真实传递给流水线
-    data = {
-        "paper_title": paper_title,
-        "pdf_path": pdf_path,
-        "corpus_paper": corpus_paper,
-    }
-
-    agents_info = [
-        ("READ_PAPER", "📖 PaperReader", "reader"),
-        ("FIND_RESOURCES", "🔍 ResourceFinder", "finder"),
-        ("BUILD_ENV", "🔧 EnvBuilder", "builder"),
-        ("EXECUTE_CODE", "⚡ CodeExecutor", "executor"),
-        ("VALIDATE", "✅ ResultValidator", "validator"),
-    ]
-
-    for state_name, display_name, agent_key in agents_info:
-        st.session_state.current_state = state_name
-        st.session_state.agent_status[display_name] = "running"
-        yield
-
-        agent = orchestrator.agents[agent_key]
-        try:
-            result = agent.run(data)
-
-            if state_name == "READ_PAPER":
-                data["paper_info"] = result.get("paper_info", {})
-                data["raw_text"] = result.get("raw_text", "")
-            elif state_name == "FIND_RESOURCES":
-                data["resources"] = result.get("resources", {})
-            elif state_name == "BUILD_ENV":
-                data["env_config"] = result.get("env_config", {})
-            elif state_name == "EXECUTE_CODE":
-                data["execution"] = result
-            elif state_name == "VALIDATE":
-                data["validation"] = result
-
-            # Prompt-Free 验证
-            verif = orchestrator.agents["verifier"].run({
-                "agent_name": agent.name,
-                "system_prompt": getattr(agent, "system_prompt", "") or agent.name,
-                "output": result,
-            })
-            data.setdefault("verifications", []).append(
-                {"state": state_name, "agent": agent.name, **verif})
-
-            data["total_llm_calls"] = data.get("total_llm_calls", 0) + \
-                int(result.get("llm_calls", 0) or 0)
-
-            st.session_state.agent_status[display_name] = "success"
-            st.session_state.logs = logger.get_summary()
-            yield
-
-        except Exception as e:
-            st.session_state.agent_status[display_name] = "error"
-            st.session_state.current_state = "ERROR"
-            st.session_state.logs = logger.get_summary()
-            yield
-            break
-
-    st.session_state.agent_status["🛡️ Verifier"] = "success"
-
-    # 优化阶段：仅在复现成功后触发
-    if st.session_state.current_state != "ERROR":
-        if data.get("validation", {}).get("is_reproduced"):
-            st.session_state.current_state = "OPTIMIZING"
-            st.session_state.agent_status["🧪 Optimizer"] = "running"
-            yield
-            try:
-                data["optimization"] = orchestrator.agents["optimizer"].run(data)
-                st.session_state.current_state = "OPTIMIZED"
-                st.session_state.agent_status["🧪 Optimizer"] = "success"
-            except Exception as e:
-                st.session_state.current_state = "ERROR"
-                st.session_state.agent_status["🧪 Optimizer"] = "error"
-        else:
-            data["optimization"] = {"optimized": False,
-                                    "reason": "复现未成功,跳过优化"}
-            st.session_state.agent_status["🧪 Optimizer"] = "waiting"
-        st.session_state.logs = logger.get_summary()
-        yield
-
-    # 报告生成（合并复现 + 优化）
-    if st.session_state.current_state != "ERROR":
-        st.session_state.current_state = "GENERATE_REPORT"
-        st.session_state.agent_status["📝 ReportGenerator"] = "running"
-        yield
-        try:
-            data["report"] = orchestrator.agents["reporter"].run(data) \
-                .get("report", "")
-            st.session_state.agent_status["📝 ReportGenerator"] = "success"
-        except Exception as e:
-            st.session_state.current_state = "ERROR"
-            st.session_state.agent_status["📝 ReportGenerator"] = "error"
-        st.session_state.logs = logger.get_summary()
-        yield
-
-    if st.session_state.current_state != "ERROR":
-        st.session_state.current_state = "COMPLETED"
-        data["audit_summary"] = logger.get_stats()
-
-    st.session_state.result = {
-        "state": st.session_state.current_state,
-        "error": None,
-        "data": data,
-        "audit_logs": logger.get_summary(),
-        "audit_stats": logger.get_stats(),
-    }
-    st.session_state.logs = logger.get_summary()
-    st.session_state.running = False
-    yield
+def _new_progress_file() -> str:
+    """创建本次复现的进度文件路径（data/runtime/progress_<毫秒>.jsonl）。"""
+    runtime_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "runtime")
+    os.makedirs(runtime_dir, exist_ok=True)
+    return os.path.join(runtime_dir,
+                        f"progress_{int(time.time() * 1000)}.jsonl")
 
 
-# 启动按钮处理
+# 启动按钮处理：后台线程执行流水线，主线程立即返回并轮询进度
 if start_btn:
     pt = st.session_state.paper_title or ""
-    pdf_path = ""
     if not pt and not uploaded_file:
         st.error("请先输入论文标题或上传PDF文件")
+    elif not st.session_state.mock_mode and config_missing(base_url, model_name):
+        st.error("真实模式缺少 LLM 配置（"
+                 + "、".join(config_missing(base_url, model_name))
+                 + "）。请在侧边栏填写，或设置环境变量 "
+                   "LLM_BASE_URL / LLM_MODEL 后重试。")
     else:
         tmp_pdf = _save_uploaded_pdf(uploaded_file) if uploaded_file else ""
-        with st.spinner("正在执行复现流程..."):
-            try:
-                for _ in run_pipeline(
-                        paper_title=pt, pdf_path=tmp_pdf,
-                        corpus_paper=corpus_paper,
-                        model_name=model_name, base_url=base_url,
-                        api_key=api_key,
-                        mock_mode=st.session_state.mock_mode,
-                        max_trials=max_trials):
-                    time.sleep(0.3)
-            finally:
-                if tmp_pdf and os.path.exists(tmp_pdf):
-                    try:
-                        os.unlink(tmp_pdf)
-                    except OSError:
-                        pass
+        progress_file = _new_progress_file()
+        st.session_state.progress_file = progress_file
+        st.session_state.running = True
+        st.session_state.result = None
+        st.session_state.logs = []
+        st.session_state.agent_status = {}
+        st.session_state.current_state = "INIT"
+        st.session_state.pipeline_note = (
+            "复现流水线已在后台启动，进度实时刷新中…")
+        run_pipeline_background(
+            progress_file,
+            paper_title=pt, pdf_path=tmp_pdf,
+            corpus_paper=corpus_paper,
+            model_name=model_name, base_url=base_url,
+            api_key=api_key,
+            mock_mode=st.session_state.mock_mode,
+            max_trials=max_trials,
+            cleanup_pdf=True)   # 临时 PDF 由后台线程负责删除
         st.rerun()
+
+# 测试连接按钮处理
+if link_btn:
+    st.session_state.connection_result = None
+    with st.spinner("正在测试 API 连接..."):
+        ok, msg = test_llm_connection(base_url, api_key, model_name)
+    st.session_state.connection_result = (ok, msg)
+    st.rerun()
 
 # 重置按钮处理
 if reset_btn:
@@ -517,6 +586,9 @@ if reset_btn:
     st.session_state.logs = []
     st.session_state.current_state = "INIT"
     st.session_state.agent_status = {}
+    st.session_state.connection_result = None
+    st.session_state.progress_file = None
+    st.session_state.pipeline_note = None
     st.rerun()
 
 # 底部信息

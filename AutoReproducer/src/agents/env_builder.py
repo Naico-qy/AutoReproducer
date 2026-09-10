@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 from typing import Dict, List
 from src.base_agent import BaseAgent
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 
 # 依赖诊断轮数（方案要求 5 轮）
 MAX_DIAGNOSE_ROUNDS = 5

@@ -9,7 +9,7 @@ import json
 import re
 from typing import Dict
 from src.base_agent import BaseAgent
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 
 # 指标提取模式：键名 -> 输出中的统一指标名
 _METRIC_PATTERNS = [

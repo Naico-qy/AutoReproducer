@@ -31,7 +31,7 @@ class ReportGeneratorAgent(BaseAgent):
         execution = data.get("execution", {}) or {}
         validation = data.get("validation", {}) or {}
         optimization = data.get("optimization", {}) or {}
-        audit = data.get("audit_summary", {}) or {}
+        audit = data.get("audit_stats", {}) or {}
 
         lines = ["# 论文复现与优化报告",
                  "",

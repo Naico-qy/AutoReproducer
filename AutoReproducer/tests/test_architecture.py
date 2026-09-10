@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 from src.optimizer.ucb_scheduler import UCBScheduler
 from src.agents.paper_reader import PaperReaderAgent
 from src.agents.result_validator import ResultValidatorAgent
@@ -37,10 +37,6 @@ from src.orchestrator import Orchestrator
 def make_mock_llm():
     """Mock 模式 LLMClient，供不关心真实调用的单测使用。"""
     return LLMClient(mock_mode=True)
-
-
-def _skip_if_no(executable: str):
-    return shutil.which(executable) is None
 
 
 # ============================================================
@@ -266,37 +262,6 @@ class TestEndToEnd:
 
 
 # ============================================================
-# 7. 真实模式（本机有 Ollama/Docker 才执行，否则 skip）
-# ============================================================
-
-def _ollama_available() -> bool:
-    if _skip_if_no("ollama"):
-        return False
-    import subprocess
-    try:
-        r = subprocess.run(["ollama", "list"], capture_output=True,
-                           text=True, timeout=10)
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-OLLAMA_OK = _ollama_available()
-
-
-@pytest.mark.skipif(not OLLAMA_OK, reason="本机无 Ollama,跳过真实调用")
-class TestRealMode:
-    """真实(API)模式追加验证：本机有 OpenAI 兼容端点（如 Ollama /v1）时真实连通。"""
-
-    def test_openai_compatible_endpoint_chat(self):
-        llm = LLMClient(mock_mode=False,
-                        base_url="http://localhost:11434",
-                        model="qwen2.5:7b")
-        text = llm.chat("用一句话介绍什么是卷积神经网络。")
-        assert text and "[LLM" not in text
-
-
-# ============================================================
 # 真实(API)模式：OpenAI 兼容格式（本地假服务器，不依赖外部服务）
 # ============================================================
 
@@ -385,7 +350,9 @@ class TestAPIMode:
         llm = LLMClient(base_url="http://127.0.0.1:1", model="m",
                         mock_mode=True)
         text = llm.chat("训练代码", task="code_executor")
-        assert "import numpy" in text          # 走 Mock 分发，不触网
+        # Mock code_executor 为纯标准库实现（不依赖 numpy 等第三方包），
+        # 含 mock 特有输出即证明走了 Mock 分发、未触网
+        assert "Test accuracy: 85.2%" in text
         assert "Error" not in text
 
     def test_http_error_returns_clear_message(self, fake_openai_server):

@@ -3,7 +3,10 @@
 对齐方案「Phase 4: 代码执行」：
 - 两阶段执行：smoke test（短时冒烟，快速暴露环境问题）-> full run（完整运行）；
 - 捕获标准输出、错误日志、退出码；
-- 支持本地子进程（隔离临时目录 + 超时）与 Docker 容器两种沙箱。
+- 支持本地子进程（隔离临时目录 + 超时）与 Docker 容器两种沙箱；
+- 本地模式执行前按 env_config 依赖清单自动 pip 安装（幂等缓存 +
+  独立超时 + 失败诊断），修复"EnvBuilder 给出依赖但本地执行器直接运行
+  导致 ModuleNotFoundError"缺陷——复现环境与执行环境现在保持一致。
 """
 import os
 import re
@@ -11,29 +14,41 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List
+from typing import Dict, List, Optional
 from src.base_agent import BaseAgent
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 from src.agents.env_builder import PIP_INDEX_URL, PIP_FIND_LINKS
 
 LOCAL_TIMEOUT_SMOKE = 10
 LOCAL_TIMEOUT_FULL = 60
 DOCKER_TIMEOUT_SMOKE = 30
 DOCKER_TIMEOUT_FULL = 300
+# 本地依赖安装超时（numpy/matplotlib/torch 等大包需要更长时间）
+LOCAL_PIP_TIMEOUT = 300
+# 进程内依赖安装结果缓存：依赖清单文本 -> ""(已就绪) 或 失败诊断文本。
+# smoke/full/多次优化重跑共用一个进程，只对同一清单安装一次；
+# 失败也缓存，避免反复重装浪费时间。
+_INSTALLED_DEPS: Dict[str, str] = {}
 
 # markdown 代码块围栏（可能带 python 语言标注）
 _CODE_FENCE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
 # 行首残留的围栏/引号残片
 _FENCE_LEFT = re.compile(r"^\s*(```+|>>>|\.\.\.)\s*", re.MULTILINE)
 # 判定"看起来像 Python 代码行"的行首（\w 会匹配中文,故全部用 ASCII 白名单）
+# 覆盖：import/from/def/class/if/for/while/try/except/with/return/print/raise/
+# pass/break/continue/del/assert/global/nonlocal/yield/match/case/lambda/
+# 装饰器@/注释#/赋值= / 函数调用()/索引访问[]/属性访问. / 数字
 _CODE_LINE_START = re.compile(
     r"^\s*(?:"
     r"import\s|from\s|def\s|class\s|if\s|elif\s|else\s*:|for\s|while\s|"
     r"try\s*:|except\s|finally\s*:|with\s|return\s|print\s*\(|raise\s|"
     r"pass\s*$|break\s*$|continue\s*$|del\s|assert\s|global\s|nonlocal\s|"
     r"yield\s|match\s|case\s|lambda\s|@|#|"
-    r"[A-Za-z_][A-Za-z0-9_.]*\s*=|"
-    r"[A-Za-z_\[\(\"']|[\d+\-.]"
+    r"[A-Za-z_][A-Za-z0-9_.]*\s*=|"                    # 赋值
+    r"[A-Za-z_][A-Za-z0-9_.]*\s*\(|"                   # 函数调用 super().__init__()
+    r"[A-Za-z_][A-Za-z0-9_.]*\s*\[|"                   # 索引 self.net[0]
+    r"[A-Za-z_][A-Za-z0-9_.]*\s*\."                    # 属性访问 self.net.forward
+    r"|[A-Za-z_\[\(\"']|[\d+\-.]"                      # 兜底：字母/括号/引号/数字开头
     r")")
 
 
@@ -132,6 +147,12 @@ class CodeExecutorAgent(BaseAgent):
         fenced = _CODE_FENCE.findall(text)
         if fenced:
             text = max(fenced, key=len).strip()
+            # 直接尝试编译——代码块内应只有纯代码，保持缩进
+            try:
+                compile(text, "<generated>", "exec")
+                return text
+            except SyntaxError:
+                pass  # 可能混入了叙述行，继续向下清理
 
         # 2) 逐行剥离叙述行,只保留代码行与代码内空行
         cleaned = []
@@ -167,15 +188,49 @@ class CodeExecutorAgent(BaseAgent):
 
     # ---------------- 执行 ----------------
 
-    def _execute_code(self, code: str, stage: str) -> Dict:
-        """执行代码：本地子进程或 Docker 容器，按阶段使用不同超时。"""
-        if self.use_docker:
-            return self._execute_code_docker(code, stage)
-        return self._execute_code_local(code, stage)
+    def _execute_code(self, code: str, stage: str,
+                      workdir: Optional[str] = None) -> Dict:
+        """执行代码：本地子进程或 Docker 容器，按阶段使用不同超时。
 
-    def _execute_code_local(self, code: str, stage: str) -> Dict:
-        """在本地临时文件中执行代码（隔离目录，限制超时）。"""
-        workdir = tempfile.mkdtemp(prefix="autorepro_exec_")
+        workdir: 指定执行目录时在目标目录执行且不清理（生命周期由调用方
+        管理，如优化器真实执行配合快照回滚）；缺省时使用临时目录（用完删除）。
+        """
+        if self.use_docker:
+            return self._execute_code_docker(code, stage, workdir=workdir)
+        return self._execute_code_local(code, stage, workdir=workdir)
+
+    def execute_in_workspace(self, code: str, workdir: str,
+                             stage: str = "full") -> Dict:
+        """在指定工作区目录中执行代码（真实优化闭环用）。
+
+        与 _execute_code 的区别：工作目录由调用方提供且执行后保留
+        （不清理），配合 src.safety.workspace_snapshot 完成
+        "补丁 -> 真实重跑 -> 快照回滚"的安全优化闭环。
+        """
+        return self._execute_code(code, stage, workdir=workdir)
+
+    def _execute_code_local(self, code: str, stage: str,
+                            workdir: Optional[str] = None) -> Dict:
+        """在本地执行代码：临时目录（不指定 workdir）或目标目录执行。
+
+        执行前按 env_config 依赖清单自动安装依赖（_ensure_local_deps），
+        依赖安装失败时直接返回失败诊断，不浪费脚本执行预算。
+        """
+        cleanup = workdir is None
+        if workdir is None:
+            workdir = tempfile.mkdtemp(prefix="autorepro_exec_")
+        else:
+            os.makedirs(workdir, exist_ok=True)
+
+        # 依赖预装：缺失依赖时运行必然失败，先安装再执行
+        deps_err = self._ensure_local_deps(workdir)
+        if deps_err:
+            if cleanup:
+                shutil.rmtree(workdir, ignore_errors=True)
+            return {"success": False, "stdout": "",
+                    "stderr": deps_err, "exit_code": -4,
+                    "deps_prepared": False}
+
         script = os.path.join(workdir, "run.py")
         timeout = LOCAL_TIMEOUT_SMOKE if stage == "smoke" else LOCAL_TIMEOUT_FULL
         try:
@@ -192,18 +247,77 @@ class CodeExecutorAgent(BaseAgent):
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.returncode,
+                "deps_prepared": True,
             }
         except subprocess.TimeoutExpired:
             return {"success": False, "stdout": "",
-                    "stderr": f"执行超时({timeout}s, {stage})", "exit_code": -1}
+                    "stderr": f"执行超时({timeout}s, {stage})", "exit_code": -1,
+                    "deps_prepared": True}
         except Exception as e:
             return {"success": False, "stdout": "", "stderr": str(e),
-                    "exit_code": -2}
+                    "exit_code": -2, "deps_prepared": True}
         finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+            if cleanup:
+                shutil.rmtree(workdir, ignore_errors=True)
 
-    def _execute_code_docker(self, code: str, stage: str) -> Dict:
-        """在 Docker 容器中执行代码（挂载临时目录，隔离运行）。
+    def _ensure_local_deps(self, workdir: str) -> Optional[str]:
+        """确保本地执行环境已安装论文依赖；None 表示就绪，否则返回诊断文本。
+
+        依赖来源与 Docker 路径一致：优先 env_config.requirements_txt，
+        否则回退 required_packages。安装走 `pip install`（国内镜像 +
+        find-links，与 EnvBuilder 同源），成功/失败均缓存到进程级
+        _INSTALLED_DEPS，避免 smoke/full/优化重跑重复安装。
+        """
+        env_config = getattr(self, "env_config", None) or {}
+        reqs = (env_config.get("requirements_txt") or "").strip()
+        if not reqs:
+            pkgs = env_config.get("required_packages") or []
+            if isinstance(pkgs, list):
+                reqs = "\n".join(str(p) for p in pkgs if p).strip()
+        if not reqs:
+            return None
+
+        key = reqs
+        if key in _INSTALLED_DEPS:
+            return _INSTALLED_DEPS[key] or None
+
+        req_file = os.path.join(workdir, "requirements.txt")
+        with open(req_file, "w", encoding="utf-8") as f:
+            f.write(reqs)
+        self.log("install_deps", "RUNNING",
+                 f"按依赖清单安装环境依赖: {reqs[:120]}...")
+
+        cmd = [sys.executable, "-m", "pip", "install",
+               "--disable-pip-version-check", "-q",
+               "-i", PIP_INDEX_URL]
+        if PIP_FIND_LINKS:
+            cmd += ["--find-links", PIP_FIND_LINKS]
+        cmd += ["-r", req_file]
+
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=LOCAL_PIP_TIMEOUT)
+            if res.returncode == 0:
+                _INSTALLED_DEPS[key] = ""
+                self.log("install_deps", "SUCCESS",
+                         f"环境依赖安装完成: {reqs[:120]}...")
+                return None
+            detail = (res.stderr or res.stdout or "").strip()[-800:]
+            _INSTALLED_DEPS[key] = (
+                f"依赖安装失败(exit={res.returncode}), 无法在本地环境执行: "
+                f"{detail}\n依赖清单: {reqs[:200]}...")
+        except subprocess.TimeoutExpired:
+            _INSTALLED_DEPS[key] = (
+                f"依赖安装超时({LOCAL_PIP_TIMEOUT}s), 无法在本地环境执行: "
+                f"{reqs[:200]}...")
+        except Exception as e:      # 连失败原因都拿不到（如 pip 自身异常）
+            _INSTALLED_DEPS[key] = f"依赖安装异常: {e}"
+        self.log("install_deps", "ERROR", _INSTALLED_DEPS[key][:200])
+        return _INSTALLED_DEPS[key]
+
+    def _execute_code_docker(self, code: str, stage: str,
+                             workdir: Optional[str] = None) -> Dict:
+        """在 Docker 容器中执行代码（挂载临时目录或指定目录，隔离运行）。
 
         镜像选择：优先使用 env_config.image_tag（如流水线 EnvBuilder 已构建的
         autorepro-env 镜像，内含 requirements 依赖）；否则退回 python:3.11-slim，
@@ -222,7 +336,11 @@ class CodeExecutorAgent(BaseAgent):
             if isinstance(pkgs, list):
                 reqs = "\n".join(str(p) for p in pkgs if p).strip()
 
-        workdir = tempfile.mkdtemp(prefix="autorepro_docker_")
+        cleanup = workdir is None
+        if workdir is None:
+            workdir = tempfile.mkdtemp(prefix="autorepro_docker_")
+        else:
+            os.makedirs(workdir, exist_ok=True)
         script = os.path.join(workdir, "run.py")
         timeout = DOCKER_TIMEOUT_SMOKE if stage == "smoke" else DOCKER_TIMEOUT_FULL
         try:
@@ -257,7 +375,8 @@ class CodeExecutorAgent(BaseAgent):
             return {"success": False, "stdout": "", "stderr": str(e),
                     "exit_code": -2}
         finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+            if cleanup:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     # ---------------- 内部工具 ----------------
 

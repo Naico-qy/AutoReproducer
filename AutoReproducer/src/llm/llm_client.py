@@ -3,8 +3,9 @@
 真实模式不再依赖本地 Ollama 部署，改用远程 LLM API（OpenAI 兼容接口，
 不绑定厂商），通过环境变量或构造参数配置：
 
-    LLM_BASE_URL   API 地址（含 /v1 前缀或网关根地址均可）：
-                   例如 https://api.deepseek.com/v1
+LLM_BASE_URL   API 地址（含 /v1 前缀或网关根地址均可）：
+                   例如 https://api.deepseek.com
+                       或 https://api.deepseek.com/v1
                        https://qianfan.baidubce.com/v2
                        https://api.openai.com/v1
                        http://localhost:11434   （Ollama 的 /v1 兼容端点）
@@ -52,9 +53,9 @@ _MOCK_TASKS = {
         "setup_commands": ["pip install -r requirements.txt"],
         "estimated_disk_gb": 3.0,
     },
+# 纯标准库实现：不依赖 numpy 等第三方包，确保无额外依赖环境下
+    # Mock 端到端链路可真实执行（CodeExecutor 会以子进程运行本代码）。
     "code_executor": (
-        "import numpy as np\n"
-        "import time\n"
         "print('Training complete. Test accuracy: 85.2%')\n"
         "print('Final loss: 0.3120')\n"
     ),
@@ -66,13 +67,28 @@ _MOCK_TASKS = {
     },
     "verifier": {"pass": True, "issues": [],
                  "fix_suggestions": [], "confidence": 0.9},
-    "optimizer_arms": {
+"optimizer_arms": {
         "suggestions": [
             "将学习率从 0.01 降至 0.005 并配合余弦退火",
             "将 SGD 替换为 AdamW 并加入权重衰减 1e-4",
             "增加 Batch Normalization 层以稳定训练",
         ]
     },
+    # Mock 补丁：可真实执行的改进版脚本（epochs 提升,accuracy 85.2% -> 90.0%,
+    # 相对提升约 5.6% >= 3%,用于演示"真实执行 + Keep/Reject"闭环）
+    "optimizer_patch": (
+        "def train(epochs=20):\n"
+        "    correct = 0\n"
+        "    total = 200\n"
+        "    for e in range(epochs):\n"
+        "        correct = int(total * 0.90)\n"
+        "    print('Training complete. Test accuracy: 90.0%')\n"
+        "    print('Final loss: 0.1800')\n"
+        "    return correct / total\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    train()\n"
+    ),
 }
 
 
@@ -152,6 +168,8 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "stream": False,
+            # 给足 token 防止长代码被截断（8192 ≈ 6K 中文字或 2K 行 Python）
+            "max_tokens": 8192,
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:

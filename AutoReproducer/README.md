@@ -97,19 +97,19 @@ INIT → READ_PAPER → FIND_RESOURCES → BUILD_ENV → EXECUTE_CODE → VALIDA
 
 | 环境变量 | 说明 | 示例 |
 | --- | --- | --- |
-| `LLM_BASE_URL` | OpenAI 兼容端点（含 `/v1` 前缀或网关根地址均可） | `https://api.deepseek.com/v1`、`https://qianfan.baidubce.com/v2`、`https://api.openai.com/v1` |
+| `LLM_BASE_URL` | OpenAI 兼容端点（含 `/v1` 前缀或网关根地址均可） | `https://api.deepseek.com`、`https://qianfan.baidubce.com/v2`、`https://api.openai.com/v1` |
 | `LLM_API_KEY` | API 访问密钥（无鉴权服务可留空） | `sk-xxxx` |
 | `LLM_MODEL` | 模型名 | `deepseek-chat`、`ernie-4.0-8k`、`gpt-4o-mini` |
 | `LLM_TIMEOUT` | 请求超时秒数（默认 120） | `120` |
 
 ```bash
 # Linux / macOS
-export LLM_BASE_URL="https://api.deepseek.com/v1"
+export LLM_BASE_URL="https://api.deepseek.com"
 export LLM_API_KEY="sk-xxxx"
 export LLM_MODEL="deepseek-chat"
 
 # Windows PowerShell
-$env:LLM_BASE_URL = "https://api.deepseek.com/v1"
+$env:LLM_BASE_URL = "https://api.deepseek.com"
 $env:LLM_API_KEY = "sk-xxxx"
 $env:LLM_MODEL = "deepseek-chat"
 ```
@@ -118,7 +118,7 @@ $env:LLM_MODEL = "deepseek-chat"
 
 ## DeepSeek 快速接入
 
-项目默认配置已指向 DeepSeek（`https://api.deepseek.com/v1` + `deepseek-chat`），接入只需两步：
+项目默认配置已指向 DeepSeek（`https://api.deepseek.com` + `deepseek-chat`），接入只需两步：
 
 1. **获取 API Key**：登录 [platform.deepseek.com](https://platform.deepseek.com) → 「API Keys」→ 创建密钥（按量付费，新用户有赠送额度）。
 2. **配置方式二选一**：
@@ -128,12 +128,12 @@ $env:LLM_MODEL = "deepseek-chat"
 
      ```bash
      # Linux / macOS
-     export LLM_BASE_URL="https://api.deepseek.com/v1"
+     export LLM_BASE_URL="https://api.deepseek.com"
      export LLM_API_KEY="sk-你的key"
      export LLM_MODEL="deepseek-chat"
 
      # Windows PowerShell
-     $env:LLM_BASE_URL = "https://api.deepseek.com/v1"
+     $env:LLM_BASE_URL = "https://api.deepseek.com"
      $env:LLM_API_KEY = "sk-你的key"
      $env:LLM_MODEL = "deepseek-chat"
      ```
@@ -149,7 +149,7 @@ $env:LLM_MODEL = "deepseek-chat"
 
 ```python
 from src.orchestrator import Orchestrator
-from src.llm.ollama_client import LLMClient
+from src.llm.llm_client import LLMClient
 
 llm = LLMClient(mock_mode=True)           # Mock 演示；真实模式 mock_mode=False
 orch = Orchestrator(llm_client=llm, mock_mode=True, max_trials=6)
@@ -195,9 +195,11 @@ AutoReproducer/
 │   ├── optimizer/
 │   │   └── ucb_scheduler.py   # UCB 多臂老虎机调度器
 │   ├── llm/
-│   │   └── ollama_client.py   # LLM API 客户端（OpenAI 兼容；Mock 任务精确分发）
+│   │   └── llm_client.py   # LLM API 客户端（OpenAI 兼容；Mock 任务精确分发）
 │   └── audit/
 │       └── audit_logger.py    # 审计日志 + 实验账本（replay 回放）
+├── references/
+│   └── paperbench/            # 语料对照层数据：PaperBench 23 篇论文复现提交物
 └── data/                      # 日志 / 账本 / 报告（已 gitignore）
 ```
 
