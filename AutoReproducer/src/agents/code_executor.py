@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -669,7 +670,26 @@ class CodeExecutorAgent(BaseAgent):
     def _run_docker_cmd_with_sandbox(
             self, base_cmd: List[str], image: str, runner: List[str],
             timeout: int) -> tuple:
+        """带加固参数执行 docker run（含容器耗时计量，P1-⑫）。
+
+        把实际执行委托给 _run_docker_cmd_with_sandbox_impl，
+        无论成功/降级/非加固/超时路径，都在 finally 中以真实墙钟
+        时长归入当前 plan 的 exec_calls/exec_seconds（无 plan 上
+        下文时归入 unattributed 桶），支撑容器耗时的可审计核算。
+        """
+        t0 = time.monotonic()
+        try:
+            return self._run_docker_cmd_with_sandbox_impl(
+                base_cmd, image, runner, timeout)
+        finally:
+            self.logger.record_sandbox_exec(round(time.time() - t0, 3))
+
+    def _run_docker_cmd_with_sandbox_impl(
+            self, base_cmd: List[str], image: str, runner: List[str],
+            timeout: int) -> tuple:
         """带加固参数执行 docker run；加固参数与 Docker/环境不兼容时自动降级。
+
+        实际执行体（含降级链）。
 
         降级链（level 0 -> 1 -> 2）：失败 stderr 命中不兼容特征（unknown flag
         / permission denied / read-only file system 等）才降级；与加固无关的
@@ -682,6 +702,7 @@ class CodeExecutorAgent(BaseAgent):
                 base_cmd + [image] + runner,
                 capture_output=True, text=True, timeout=timeout)
             return result, {"hardened": False, "level": None, "degraded": False}
+        result = None  # 循环内必赋值；None 仅用于静态类型安抚
         last_meta: Dict = {"hardened": True, "level": 0, "degraded": False}
         for level in range(3):
             args = self._sandbox_args(level)
@@ -815,6 +836,8 @@ class CodeExecutorAgent(BaseAgent):
                                "ok": True, "error": None})
                 self.log("self_heal", "RUNNING",
                          f"Docker 缺模块 {module},累积重跑")
+            # 循环至少执行一次（MAX_PIP_SELF_HEAL >= 0），result 必已赋值
+            assert result is not None
             result = {
                 "success": result.returncode == 0,
                 "stdout": result.stdout,

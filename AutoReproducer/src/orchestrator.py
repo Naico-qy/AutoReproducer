@@ -49,6 +49,11 @@ class Orchestrator:
         self.state = "INIT"
         self.logger = logger or AuditLogger()
         self.llm = llm_client or LLMClient(mock_mode=mock_mode)
+        # P1-⑫ 用量计量：把 LLM 调用的 token/耗时通过 hook 归入当前 plan
+        # （AuditLogger 按流水线阶段的 begin_plan/end_plan 界定 plan 边界）
+        # 兼容外部注入的 mock/脚本 LLM（无 usage_hook 属性时静默跳过）。
+        if hasattr(self.llm, "usage_hook"):
+            self.llm.usage_hook = self.logger.record_llm_usage
         self.max_trials = max_trials
         self.use_docker = use_docker
         # 优化工作区:提供时启用 Optimizer 真实执行闭环(补丁 -> 白名单 ->
@@ -125,6 +130,8 @@ class Orchestrator:
 
         for state_name, agent in pipeline:
             self.state = state_name
+            # P1-⑫ 用量计量：阶段级 plan（enter/exit 界定，失败也出栈）
+            self.logger.begin_plan(state_name)
             self.logger.log("Orchestrator", f"enter_{state_name}", "RUNNING",
                             f"进入阶段: {state_name}")
             try:
@@ -166,7 +173,9 @@ class Orchestrator:
 
                 self.logger.log("Orchestrator", f"exit_{state_name}", "SUCCESS",
                                 f"完成阶段: {state_name}")
+                self.logger.end_plan(state_name)
             except Exception as e:
+                self.logger.end_plan(state_name)
                 self._fail(state_name, str(e))
                 break
 
@@ -174,6 +183,7 @@ class Orchestrator:
         if self.state != "ERROR":
             if self.data.get("validation", {}).get("is_reproduced"):
                 self.state = "OPTIMIZING"
+                self.logger.begin_plan("OPTIMIZING")
                 self.logger.log("Orchestrator", "enter_OPTIMIZING", "RUNNING",
                                 "进入优化阶段")
                 try:
@@ -187,7 +197,9 @@ class Orchestrator:
                     self.state = "OPTIMIZED"
                     self.logger.log("Orchestrator", "exit_OPTIMIZING", "SUCCESS",
                                     "优化阶段完成")
+                    self.logger.end_plan("OPTIMIZING")
                 except Exception as e:
+                    self.logger.end_plan("OPTIMIZING")
                     self._fail("OPTIMIZING", str(e))
             else:
                 self.data["optimization"] = {
@@ -197,11 +209,14 @@ class Orchestrator:
         # 报告生成（合并复现 + 优化）
         if self.state != "ERROR":
             self.state = "GENERATE_REPORT"
+            self.logger.begin_plan("GENERATE_REPORT")
             self.data["audit_stats"] = self.logger.get_stats()
             try:
                 self.data["report"] = self.agents["reporter"].run(self.data) \
                     .get("report", "")
+                self.logger.end_plan("GENERATE_REPORT")
             except Exception as e:
+                self.logger.end_plan("GENERATE_REPORT")
                 self._fail("GENERATE_REPORT", str(e))
 
         if self.state != "ERROR":
