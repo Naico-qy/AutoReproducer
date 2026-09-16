@@ -62,7 +62,8 @@ class Orchestrator:
         # 初始化所有 Agent
         self.agents: Dict[str, Any] = {
             "reader": PaperReaderAgent(self.llm, self.logger),
-            "finder": ResourceFinderAgent(self.llm, self.logger),
+            "finder": ResourceFinderAgent(self.llm, self.logger,
+                                          offline=mock_mode),
             "builder": EnvBuilderAgent(self.llm, self.logger),
             "executor": CodeExecutorAgent(self.llm, self.logger,
                                           use_docker=use_docker,
@@ -247,15 +248,25 @@ class Orchestrator:
         rm = self.resource_manager
         resources = self.data.get("resources", {}) or {}
         paper_id = self.data.get("paper_id", "")
-        code_url = self._clean_ref(resources.get("code_repo_url", ""))
+        # P1-⑨: 确定性发现链选中的仓库为权威主线，LLM 猜测仅兜底
+        discovery = resources.get("repo_discovery") or {}
+        code_url = self._clean_ref(
+            discovery.get("selected_repo")
+            or resources.get("code_repo_url", ""))
+        pinned_revision = discovery.get("pinned_revision") or ""
         dataset_name = self._clean_ref(resources.get("dataset_url", ""))
         weights_ref = self._clean_ref(
             resources.get("weights_url") or resources.get("weights_ref", ""))
-        level = (self.data.get("storage") or {}).get(
-            "repro_level", "smoke") or "smoke"
+        # 复现模式: ResourceFinder 的决策优先（考虑显式 full/内存），
+        # 无决策时回退 storage.repro_level（默认 smoke）
+        repro_mode = resources.get("repro_mode") or {}
+        level = (repro_mode.get("effective_mode")
+                 or (self.data.get("storage") or {}).get(
+                     "repro_level", "smoke")) or "smoke"
         try:
             fetched = {
-                "code": rm.fetch_code(paper_id, code_url),
+                "code": rm.fetch_code(paper_id, code_url,
+                                      revision=pinned_revision),
                 "dataset": rm.fetch_dataset(paper_id, dataset_name,
                                             level=level),
                 "weights": rm.fetch_weights(paper_id, weights_ref),

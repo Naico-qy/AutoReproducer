@@ -146,15 +146,23 @@ class ResourceManager:
     # ---------------- 懒加载：代码 ----------------
 
     def fetch_code(self, paper_id: str, code_url: str,
-                   target: Optional[str] = None) -> Dict:
+                   target: Optional[str] = None,
+                   revision: str = "") -> Dict:
         """拉取论文代码仓库到 L0；已存在则幂等复用。
 
-        返回 {"path": 本地目录或"" , "state": 状态, "detail": 说明}。
+        revision 非空时，clone 后尝试浅拉取并 detach 到该 revision
+        （commit sha / tag）；失败仅降级为 HEAD 并标注，不阻断。
+        成功克隆/复用后写入源标记 .autorepro-repo-source.json
+        （repo_url / commit / acquisition），供证据链与报告溯源。
+
+        返回 {"path": 本地目录或"" , "state": 状态, "detail": 说明,
+              "commit": 当前 HEAD sha, "revision": 请求的 pin}。
         state 取值：cached（已有缓存）/ cloned（新克隆）/ placeholder-skip
         （占位 URL 不下载）/ clone-failed（下载失败）。
         """
         repo_dir = Path(target) if target else self._repo_dir(paper_id)
-        info: Dict = {"path": "", "state": "skipped", "detail": ""}
+        info: Dict = {"path": "", "state": "skipped", "detail": "",
+                      "commit": "", "revision": revision or ""}
         url = (code_url or "").strip()
         if not url:
             info["detail"] = "无代码仓库 URL"
@@ -162,6 +170,7 @@ class ResourceManager:
         if repo_dir.exists() and any(repo_dir.iterdir()):
             info.update(path=str(repo_dir), state="cached",
                         detail="缓存命中，复用已有仓库")
+            self._record_repo_source(repo_dir, url, info, "cached")
             return info
         if _is_placeholder_url(url):
             info.update(state="placeholder-skip",
@@ -179,12 +188,64 @@ class ResourceManager:
             if proc.returncode == 0:
                 info.update(path=str(repo_dir), state="cloned",
                             detail=f"克隆成功: {url}")
+                self._pin_and_record(repo_dir, url, info, revision)
             else:
                 info.update(state="clone-failed",
                             detail=(proc.stderr or proc.stdout).strip()[-300:])
         except Exception as exc:       # 网络 / 超时 / git 异常
             info.update(state="clone-failed", detail=str(exc)[-300:])
         return info
+
+    @staticmethod
+    def _git_head_commit(repo_dir: Path) -> str:
+        """返回仓库当前 HEAD 的 commit sha；非 git 仓库返回空串。"""
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=15)
+            return proc.stdout.strip() if proc.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def _pin_and_record(self, repo_dir: Path, url: str, info: Dict,
+                        revision: str) -> None:
+        """pin revision（尽力而为）+ 写入源标记 + 填充 commit。"""
+        info["commit"] = self._git_head_commit(repo_dir)
+        if revision:
+            try:
+                fetch = subprocess.run(
+                    ["git", "-C", str(repo_dir), "fetch", "--depth", "1",
+                     "origin", revision],
+                    capture_output=True, text=True, timeout=120)
+                checkout = subprocess.run(
+                    ["git", "-C", str(repo_dir), "checkout", "--detach",
+                     revision],
+                    capture_output=True, text=True, timeout=60)
+                if fetch.returncode == 0 and checkout.returncode == 0:
+                    info["commit"] = self._git_head_commit(repo_dir)
+                    info["detail"] += f"; pinned revision {revision}"
+                else:
+                    info["detail"] += (f"; pin 失败({revision})，"
+                                       "保留 HEAD")
+            except (OSError, subprocess.SubprocessError):
+                info["detail"] += f"; pin 失败({revision})，保留 HEAD"
+        self._record_repo_source(repo_dir, url, info, info.get("state", ""))
+
+    def _record_repo_source(self, repo_dir: Path, url: str, info: Dict,
+                            acquisition: str) -> None:
+        """写入仓库溯源标记（供证据链 / 报告引用，失败静默）。"""
+        try:
+            marker = {
+                "repo_url": url,
+                "commit": info.get("commit", ""),
+                "acquisition": acquisition,
+                "revision": info.get("revision", ""),
+            }
+            (repo_dir / ".autorepro-repo-source.json").write_text(
+                json.dumps(marker, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except OSError:
+            pass
 
     # ---------------- 懒加载：数据集 ----------------
 
