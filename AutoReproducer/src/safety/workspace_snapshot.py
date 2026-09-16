@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 # 快照条目的类型别名：{rel_path: {"sha256": str, "content": bytes}}
 Snapshot = Dict[str, Dict[str, object]]
@@ -71,7 +71,7 @@ def changed_files(before: Snapshot, after: Snapshot) -> List[str]:
     return changed
 
 
-def workspace_fingerprint(snapshot: Snapshot) -> str:
+def workspace_fingerprint(snapshot: Mapping[str, Mapping[str, object]]) -> str:
     """对整份快照生成全局 SHA-256 指纹。
 
     仅基于 {相对路径, sha256} 组合（不含内容副本），路径字典序拼接：

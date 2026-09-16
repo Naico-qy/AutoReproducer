@@ -97,14 +97,16 @@ def test_best_maximize(store: ExperienceStore):
     store.append(_record(score=0.80))
     store.append(_record(score=0.95))
     store.append(_record(score=0.90))
-    assert store.best("repo-A")["score"] == 0.95
+    best = store.best("repo-A")
+    assert best is not None and best["score"] == 0.95
 
 
 def test_best_minimize(store: ExperienceStore):
     store.append(_record(score=0.8, direction_mode="minimize"))
     store.append(_record(score=0.3, direction_mode="minimize"))
     store.append(_record(score=0.6, direction_mode="minimize"))
-    assert store.best("repo-A", direction_mode="minimize")["score"] == 0.3
+    best = store.best("repo-A", direction_mode="minimize")
+    assert best is not None and best["score"] == 0.3
 
 
 def test_best_only_validated(store: ExperienceStore):
