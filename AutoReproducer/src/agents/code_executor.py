@@ -7,6 +7,13 @@
 - 本地模式执行前按 env_config 依赖清单自动 pip 安装（幂等缓存 +
   独立超时 + 失败诊断），修复"EnvBuilder 给出依赖但本地执行器直接运行
   导致 ModuleNotFoundError"缺陷——复现环境与执行环境现在保持一致；
+- 存储优化（对齐方案「三层存储」L0 热缓存）：
+  * mock_mode=True 时跳过真实 pip 安装（mock 演示不触网、不装大包）——
+    修复"Mock 流水线 EnvBuilder 注入 torch 全家桶后本地执行器真实
+    pip install torch(2GB+)"导致演示卡死/污染全局环境的缺陷；
+  * 真实模式依赖隔离安装到 data/deps/<依赖清单哈希>/（pip --target），
+    不再装进全局 site-packages——同一依赖清单全局只装一次、多论文
+    天然共享去重；执行时经 PYTHONPATH 注入该隔离目录；
 - 执行前语法门：清洗后的代码必须能 compile，不通过则针对"截断/语法
   错误"再生成（限次），仍不可编译则诚实短路为"未运行"，绝不把残码
   送进沙箱——避免把"代码被截断"掩盖成沙箱里的 IndentationError；
@@ -19,6 +26,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import hashlib
+from pathlib import Path
 from typing import Dict, List, Optional
 from src.base_agent import BaseAgent
 from src.llm.llm_client import LLMClient
@@ -34,6 +43,17 @@ LOCAL_PIP_TIMEOUT = 300
 # smoke/full/多次优化重跑共用一个进程，只对同一清单安装一次；
 # 失败也缓存，避免反复重装浪费时间。
 _INSTALLED_DEPS: Dict[str, str] = {}
+
+# ---- L0 依赖缓存（对齐方案「三层存储」：热缓存统一收敛到项目 data/ 下） ----
+# src/agents/code_executor.py -> parents[2] 为仓库内 AutoReproducer 包根
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# 隔离依赖安装根目录：data/deps/<依赖清单 sha1 前 16 位>/
+# 同一依赖清单跨论文跨会话只落一份，多论文共享去重；可配 AUTOREPRO_DEPS_ROOT 覆盖。
+DEPS_CACHE_ROOT = Path(os.environ.get(
+    "AUTOREPRO_DEPS_ROOT",
+    str(_PROJECT_ROOT / "data" / "deps")))
+# 安装完成标志文件：存在即视为该隔离目录已就绪
+_DEPS_READY_MARK = ".ready"
 
 # 代码不可编译时的再生成次数上限（LLM 输出被截断是常见故障）
 MAX_CODE_REGEN = 2
@@ -82,10 +102,14 @@ class CodeExecutorAgent(BaseAgent):
 
     system_prompt = "在沙箱中安全执行论文代码,输出运行日志、数值结果与退出码"
 
-    def __init__(self, llm_client: LLMClient, logger=None, use_docker: bool = False):
+    def __init__(self, llm_client: LLMClient, logger=None,
+                 use_docker: bool = False, mock_mode: bool = False):
         super().__init__("CodeExecutor", logger)
         self.llm = llm_client
         self.use_docker = use_docker
+        self.mock_mode = mock_mode
+        # 最近一次依赖就绪的隔离安装目录（供执行时注入 PYTHONPATH）
+        self._deps_dir: Optional[str] = None
 
     def run(self, input_data: dict) -> dict:
         """执行论文代码（smoke test + full run）。
@@ -387,7 +411,7 @@ class CodeExecutorAgent(BaseAgent):
                 [sys.executable, script],
                 capture_output=True, text=True, timeout=timeout,
                 cwd=workdir,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                env=self._exec_env())
             return {
                 "success": result.returncode == 0,
                 "stdout": result.stdout,
@@ -410,9 +434,12 @@ class CodeExecutorAgent(BaseAgent):
         """确保本地执行环境已安装论文依赖；None 表示就绪，否则返回诊断文本。
 
         依赖来源与 Docker 路径一致：优先 env_config.requirements_txt，
-        否则回退 required_packages。安装走 `pip install`（国内镜像 +
-        find-links，与 EnvBuilder 同源），成功/失败均缓存到进程级
-        _INSTALLED_DEPS，避免 smoke/full/优化重跑重复安装。
+        否则回退 required_packages。安装走 `pip install --target`
+        （国内镜像 + find-links，与 EnvBuilder 同源），目标目录
+        data/deps/<依赖清单 sha1[:16]>/；成功/失败均缓存到进程级
+        _INSTALLED_DEPS + 磁盘 .ready 就绪标记，避免 smoke/full/优化
+        重跑重复安装，同一依赖清单跨论文全局只装一次（L0 热缓存去重）。
+        mock_mode=True 时跳过真实安装（mock 演示不触网、不装大包）。
         """
         env_config = getattr(self, "env_config", None) or {}
         reqs = (env_config.get("requirements_txt") or "").strip()
@@ -433,20 +460,44 @@ class CodeExecutorAgent(BaseAgent):
         self.log("install_deps", "RUNNING",
                  f"按依赖清单安装环境依赖: {reqs[:120]}...")
 
-        cmd = [sys.executable, "-m", "pip", "install",
-               "--disable-pip-version-check", "-q",
-               "-i", PIP_INDEX_URL]
-        if PIP_FIND_LINKS:
-            cmd += ["--find-links", PIP_FIND_LINKS]
-        cmd += ["-r", req_file]
+        # ---- 隔离安装目录（对齐三层存储 L0 热缓存）----
+        reqs_digest = hashlib.sha1(reqs.encode("utf-8")).hexdigest()[:16]
+        deps_dir = DEPS_CACHE_ROOT / reqs_digest
+        ready_mark = deps_dir / _DEPS_READY_MARK
+
+        if self.mock_mode:
+            # mock 演示：不触网、不装大包，直接视为就绪
+            self._deps_dir = None
+            _INSTALLED_DEPS[key] = ""
+            self.log("install_deps", "SUCCESS",
+                     "mock_mode 跳过真实依赖安装")
+            return None
+
+        # 磁盘就绪检测：同一依赖清单已在隔离目录装过则直接复用
+        if ready_mark.is_file():
+            self._deps_dir = str(deps_dir)
+            _INSTALLED_DEPS[key] = ""
+            self.log("install_deps", "SUCCESS",
+                     f"复用隔离依赖目录: {deps_dir.name}")
+            return None
 
         try:
+            deps_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [sys.executable, "-m", "pip", "install",
+                   "--disable-pip-version-check", "-q",
+                   "--target", str(deps_dir),
+                   "-i", PIP_INDEX_URL]
+            if PIP_FIND_LINKS:
+                cmd += ["--find-links", PIP_FIND_LINKS]
+            cmd += ["-r", req_file]
             res = subprocess.run(cmd, capture_output=True, text=True,
                                  timeout=LOCAL_PIP_TIMEOUT)
             if res.returncode == 0:
+                ready_mark.write_text("ok\n", encoding="utf-8")
+                self._deps_dir = str(deps_dir)
                 _INSTALLED_DEPS[key] = ""
                 self.log("install_deps", "SUCCESS",
-                         f"环境依赖安装完成: {reqs[:120]}...")
+                         f"隔离依赖安装完成: {deps_dir.name}")
                 return None
             detail = (res.stderr or res.stdout or "").strip()[-800:]
             _INSTALLED_DEPS[key] = (
@@ -460,6 +511,22 @@ class CodeExecutorAgent(BaseAgent):
             _INSTALLED_DEPS[key] = f"依赖安装异常: {e}"
         self.log("install_deps", "ERROR", _INSTALLED_DEPS[key][:200])
         return _INSTALLED_DEPS[key]
+
+    def _exec_env(self) -> Dict:
+        """构造子进程执行环境：依赖隔离目录存在时注入 PYTHONPATH。
+
+        隔离安装的包（data/deps/<hash>/）经 PYTHONPATH 前置，使子进程
+        import 优先命中隔离目录，不污染全局 site-packages；无隔离目录时
+        返回环境副本（行为与改造前一致）。
+        """
+        env = os.environ.copy()
+        if self._deps_dir:
+            existing = env.get("PYTHONPATH", "")
+            if existing:
+                env["PYTHONPATH"] = self._deps_dir + os.pathsep + existing
+            else:
+                env["PYTHONPATH"] = self._deps_dir
+        return env
 
     def _execute_code_docker(self, code: str, stage: str,
                              workdir: Optional[str] = None) -> Dict:
