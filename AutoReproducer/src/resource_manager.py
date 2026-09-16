@@ -92,8 +92,9 @@ def _git_available() -> bool:
 class ResourceManager:
     """论文资源（代码 / 数据集 / 权重）的懒加载与 L0 缓存管理。
 
-    dataset_registry 可为空（P1-2 接入）：为空时未知数据集一律降级
-    为本地合成冒烟集；接入后按注册表决定真实子集入口与体积。
+    dataset_registry=None 时自动启用默认 DatasetRegistry（P1-2）；
+    显式传 False 可关闭注册表（未知数据集一律降级合成冒烟集）。
+    接入后按注册表决定真实子集入口与体积预估（fetch 前即可配额决策）。
     """
 
     def __init__(self, data_root: Optional[str] = None,
@@ -106,6 +107,9 @@ class ResourceManager:
         self.manifests_root = self.data_root / "manifests"
         self.archive_root = self.data_root / "archive"
         self.quota_bytes = quota_bytes or _L0_QUOTA
+        if dataset_registry is None:
+            from src.dataset_registry import DatasetRegistry
+            dataset_registry = DatasetRegistry()
         self.dataset_registry = dataset_registry
         self.logger = logger
         for d in (self.repos_root, self.datasets_root,
@@ -212,12 +216,31 @@ class ResourceManager:
             return info
 
         meta = self._registry_lookup(name)
-        if level == "full" and meta and meta.get("entry"):
-            result = self._download_real_dataset(paper_id, name, meta, ds_dir)
-            if result["state"] == "downloaded":
-                info.update(result)
-                info["path"] = str(ds_dir)
+        if meta:
+            info["meta"] = {k: meta.get(k) for k in (
+                "name", "size_gb", "kind", "subset", "mirror", "reason")}
+        if level == "full" and meta:
+            # 注册表子集策略：torchvision 内建 -> 训练时懒加载不预下载；
+            # 零数据合成 -> 无需下载；有真实入口 -> 按入口拉子集。
+            if meta.get("torchvision_builtin"):
+                info.update(path="", state="lazy-torchvision",
+                            level="full",
+                            detail=f"{meta.get('name')} 为 torchvision 内建"
+                                   "数据集，训练代码运行时懒加载，无需预下载"
+                                   "（避免重复占用 L0）")
                 return info
+            if meta.get("synthetic"):
+                info.update(path="", state="synthetic", level="full",
+                            detail=f"{meta.get('name')} 零数据：训练代码运行时"
+                                   "合成，无需下载（体积为 0）")
+                return info
+            if meta.get("entry"):
+                result = self._download_real_dataset(
+                    paper_id, name, meta, ds_dir)
+                if result["state"] == "downloaded":
+                    info.update(result)
+                    info["path"] = str(ds_dir)
+                    return info
 
         # 降级：合成最小冒烟集（离线验证流程）
         try:
@@ -251,6 +274,25 @@ class ResourceManager:
         """按注册表真实下载数据集子集；失败返回 unavailable 状态。"""
         entry = meta.get("entry", "")
         try:
+            os.makedirs(ds_dir, exist_ok=True)
+            if entry.startswith("hf:"):
+                # HuggingFace 按需子集：仅拉数据文件通配形，不拉全仓
+                # （对齐 ImageNet/COCO 等超大数据的 percent:N 子集策略，
+                # 语义为流程验证而非数值复现）
+                from huggingface_hub import snapshot_download  # 延迟导入
+                repo = entry[3:].strip("/").split("/", 1)
+                repo_id = f"{repo[0]}/{repo[1]}" if len(repo) > 1 else repo[0]
+                target_dir = ds_dir / "dataset_full"
+                os.makedirs(target_dir, exist_ok=True)
+                local = snapshot_download(
+                    repo_id=repo_id,
+                    allow_patterns=["*.csv", "*.jsonl", "*.parquet",
+                                    "*.txt", "*.json", "*.zip"],
+                    local_dir=str(target_dir))
+                return {"state": "downloaded",
+                        "detail": f"HF 数据集子集: {repo_id}",
+                        "level": "full", "rows": 0,
+                        "path": str(local)}
             if entry.startswith("script:"):
                 script = entry.split(":", 1)[1]
                 target_dir = ds_dir / "dataset_full"
