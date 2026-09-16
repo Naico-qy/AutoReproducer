@@ -50,6 +50,30 @@ MAX_PIP_SELF_HEAL = 3
 # 失败也缓存，避免反复重装浪费时间。
 _INSTALLED_DEPS: Dict[str, str] = {}
 
+# ---- P1-⑪ Docker 沙箱加固参数（镜像白名单 + cap-drop + 只读 + 非 root + 限额） ----
+# 镜像白名单前缀（逗号分隔，可用 AUTOREPRO_DOCKER_IMAGE_ALLOWLIST 覆盖）：
+# 只允许官方/自建镜像前缀，拒绝任意第三方镜像拉取执行。
+DOCKER_IMAGE_ALLOWLIST = [p.strip() for p in os.environ.get(
+    "AUTOREPRO_DOCKER_IMAGE_ALLOWLIST",
+    "python:,pytorch/,autorepro,nvidia/").split(",") if p.strip()]
+# 加固总开关：AUTOREPRO_DOCKER_HARDEN=0 时完全不加防护参数（不推荐，仅兼容极端环境）
+DOCKER_HARDEN = os.environ.get("AUTOREPRO_DOCKER_HARDEN", "1") != "0"
+# 资源限额默认值（可覆盖 AUTOREPRO_DOCKER_CPUS/MEM/PIDS）
+DOCKER_DEFAULT_CPUS = float(os.environ.get("AUTOREPRO_DOCKER_CPUS", "2.0"))
+DOCKER_DEFAULT_MEM = os.environ.get("AUTOREPRO_DOCKER_MEM", "2g")
+DOCKER_DEFAULT_PIDS = int(os.environ.get("AUTOREPRO_DOCKER_PIDS", "256"))
+# 容器内非 root 用户（默认 nobody，可覆盖 AUTOREPRO_DOCKER_USER）
+DOCKER_DEFAULT_USER = os.environ.get("AUTOREPRO_DOCKER_USER", "65534:65534")
+# 加固开启时 pip 安装目标：tmpfs 可写目录（--read-only + 非 root 兼容）
+DOCKER_PIP_SITE = "/tmp/site-packages"
+# 加固参数与容器环境不兼容的错误特征（命中则按可用性降级重跑）
+_HARDEN_INCOMPATIBLE_HINTS = (
+    "unknown flag", "unknown shorthand flag", "not supported",
+    "operation not permitted", "permission denied",
+    "read-only file system", "readonly file system",
+    "cannot create directory", "mkdir", "no space left",
+)
+
 # ---- L0 依赖缓存（对齐方案「三层存储」：热缓存统一收敛到项目 data/ 下） ----
 # src/agents/code_executor.py -> parents[2] 为仓库内 AutoReproducer 包根
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -612,6 +636,74 @@ class CodeExecutorAgent(BaseAgent):
                 env["PYTHONPATH"] = joined
         return env
 
+    # ---------------- P1-⑪ Docker 沙箱加固 ----------------
+
+    def _image_allowed(self, image: str) -> bool:
+        """镜像白名单：只允许官方/自建镜像前缀，拒绝任意第三方镜像拉取执行。
+
+        白名单可经 AUTOREPRO_DOCKER_IMAGE_ALLOWLIST 扩展（逗号分隔前缀）。
+        """
+        return any(image.startswith(prefix) for prefix in DOCKER_IMAGE_ALLOWLIST)
+
+    def _sandbox_args(self, level: int = 0) -> List[str]:
+        """按加固级别构造 docker run 参数。
+
+        level 0（完整加固）：cap-drop ALL + no-new-privileges + 只读 rootfs
+                             + tmpfs + 非 root + CPU/mem/pids 限额；
+        level 1：去掉资源限额（老版本 Docker 不支持 --cpus/--pids-limit 时）；
+        level 2（最小隔离）：仅 cap-drop + no-new-privileges（极端环境兜底）。
+        """
+        args = ["--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges"]
+        if level >= 2:
+            return args
+        args += ["--read-only",
+                 "--tmpfs", "/tmp:rw,nosuid,size=256m",
+                 "--user", DOCKER_DEFAULT_USER]
+        if level <= 0:
+            args += ["--cpus", f"{DOCKER_DEFAULT_CPUS}",
+                     "--memory", DOCKER_DEFAULT_MEM,
+                     "--pids-limit", f"{DOCKER_DEFAULT_PIDS}"]
+        return args
+
+    def _run_docker_cmd_with_sandbox(
+            self, base_cmd: List[str], image: str, runner: List[str],
+            timeout: int) -> tuple:
+        """带加固参数执行 docker run；加固参数与 Docker/环境不兼容时自动降级。
+
+        降级链（level 0 -> 1 -> 2）：失败 stderr 命中不兼容特征（unknown flag
+        / permission denied / read-only file system 等）才降级；与加固无关的
+        失败（缺模块、代码错误）不降级，直接返回以便上层自愈。超时直接抛出，
+        不在加固级别间重试（避免重复等待）。返回 (subprocess.CompletedProcess,
+        sandbox 元信息 dict)。
+        """
+        if not DOCKER_HARDEN:
+            result = subprocess.run(
+                base_cmd + [image] + runner,
+                capture_output=True, text=True, timeout=timeout)
+            return result, {"hardened": False, "level": None, "degraded": False}
+        last_meta: Dict = {"hardened": True, "level": 0, "degraded": False}
+        for level in range(3):
+            args = self._sandbox_args(level)
+            cmd = base_cmd + args + [image] + runner
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise
+            meta = {"hardened": True, "level": level,
+                    "degraded": level > 0}
+            last_meta = meta
+            if result.returncode == 0:
+                return result, meta
+            stderr = (result.stderr or "").lower()
+            if not any(hint in stderr
+                       for hint in _HARDEN_INCOMPATIBLE_HINTS):
+                # 失败与加固无关（缺模块 / 代码运行错误）——不降级
+                return result, meta
+        # level 2（最小隔离）仍失败或加固参数不兼容 → 用最后一级元信息返回
+        return result, last_meta
+
     def _execute_code_docker(self, code: str, stage: str,
                              workdir: Optional[str] = None) -> Dict:
         """在 Docker 容器中执行代码（挂载临时目录或指定目录，隔离运行）。
@@ -619,6 +711,13 @@ class CodeExecutorAgent(BaseAgent):
         镜像选择：优先使用 env_config.image_tag（如流水线 EnvBuilder 已构建的
         autorepro-env 镜像，内含 requirements 依赖）；否则退回 python:3.11-slim，
         并把 env_config 中的 requirements 注入容器临时安装后执行。
+
+        P1-⑪ 沙箱加固：
+        - 镜像白名单：非官方/自建镜像前缀直接拒绝执行（exit_code -5）；
+        - 加固参数：cap-drop ALL / no-new-privileges / 只读 rootfs + tmpfs /
+          非 root（nobody）/ CPU·mem·pids 限额，随 Docker 可用性自动降级；
+          加固开启时 pip 安装到 tmpfs（/tmp/site-packages）并注入 PYTHONPATH，
+          兼容只读 rootfs 与非 root 用户。
         """
         docker_cmd = self._resolve_docker_cmd()
         if docker_cmd is None:
@@ -627,6 +726,17 @@ class CodeExecutorAgent(BaseAgent):
 
         env_config = getattr(self, "env_config", None) or {}
         image = env_config.get("image_tag") or "python:3.11-slim"
+        # 镜像白名单：拒绝非白名单前缀镜像，防止恶意/未知镜像进入沙箱
+        if not self._image_allowed(image):
+            return {
+                "success": False, "stdout": "",
+                "stderr": (f"镜像 {image} 不在允许白名单 "
+                           f"({'、'.join(DOCKER_IMAGE_ALLOWLIST)})，"
+                           "已拒绝执行；可用 AUTOREPRO_DOCKER_IMAGE_ALLOWLIST "
+                           "扩展白名单（逗号分隔前缀）"),
+                "exit_code": -5,
+                "sandbox": {"image_allowed": False, "image": image},
+            }
         reqs = (env_config.get("requirements_txt") or "").strip()
         if not reqs:
             pkgs = env_config.get("required_packages") or []
@@ -651,14 +761,25 @@ class CodeExecutorAgent(BaseAgent):
             # 与自愈补装包都前置到 pip 安装（容器每次 --rm 不保留现场，
             # 缺包必须累积进命令重跑）；自定义 image_tag 镜像假定已含依赖，
             # 仅做脚本运行（缺包时同样改走 pip 前置自愈）。
+            # 加固开启时 pip 安装到 tmpfs（只读 rootfs + 非 root 均可写），
+            # 并以 PYTHONPATH 注入该目录，使 run.py 能导入新增依赖。
+            pip_target = DOCKER_PIP_SITE if DOCKER_HARDEN else ""
+
             def _make_runner(heal_pkgs: list) -> list:
                 install_parts = [f"pip install -i {PIP_INDEX_URL} ",
                                  f"--find-links {PIP_FIND_LINKS} "]
+                if pip_target:
+                    install_parts.append(f"--target {pip_target} "
+                                         "--no-cache-dir ")
                 if reqs:
                     install_parts.append("-r /app/requirements.txt ")
                 if heal_pkgs:
                     install_parts.append(" ".join(heal_pkgs) + " ")
-                install_parts.append("-q && python run.py")
+                if pip_target:
+                    install_parts.append(
+                        f"-q && PYTHONPATH={pip_target} python run.py")
+                else:
+                    install_parts.append("-q && python run.py")
                 return ["sh", "-c", "".join(install_parts)]
 
             reqs_file = None
@@ -671,15 +792,17 @@ class CodeExecutorAgent(BaseAgent):
             # 累积进 pip 前置命令 -> 重跑；容器现场不保留，所以每轮都
             # 携带全部已识别缺包。
             result = None
+            sandbox_meta: Dict = {"hardened": DOCKER_HARDEN,
+                                  "image_allowed": True}
             seen = set()
             for _ in range(MAX_PIP_SELF_HEAL + 1):
                 runner = (_make_runner(healed_pkgs := [h["package"]
                            for h in healed])
                           if (image == "python:3.11-slim" and reqs)
                           or healed else ["python", "run.py"])
-                cmd = base_cmd + [image] + runner
-                result = subprocess.run(cmd, capture_output=True, text=True,
-                                        timeout=timeout)
+                result, _sandbox_run = self._run_docker_cmd_with_sandbox(
+                    base_cmd, image, runner, timeout)
+                sandbox_meta = {"image_allowed": True, **_sandbox_run}
                 if result.returncode == 0:
                     break
                 module = find_missing_module(result.stderr or "")
@@ -697,6 +820,7 @@ class CodeExecutorAgent(BaseAgent):
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.returncode,
+                "sandbox": sandbox_meta,
             }
             if healed:
                 result["healed"] = healed
