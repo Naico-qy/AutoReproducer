@@ -85,6 +85,9 @@ INIT → READ_PAPER → FIND_RESOURCES → BUILD_ENV → EXECUTE_CODE → VALIDA
 | 指标口径统一 | 论文声明 0.85（小数）与运行输出 85.2%（百分数）自动归一化后再比对 |
 | 预算统计 | 全程 LLM 调用次数累计，纳入审计统计与报告（方案预算上限 100 次） |
 | 修正闭环 | 每步输出经 Prompt-Free 验证，失败按建议修正重试 1 次，全程留痕 |
+| 用量计量（P1-⑫） | plan 级 LLM token / 容器耗时统计：按流水线阶段（READ_PAPER…OPTIMIZING…）分账，审计统计含 llm_calls / tokens / seconds / 容器维度 |
+| 确定性验证（P0-②） | 证据链模块：无真实执行证据不判 verified、smoke 上限；实验账本 replay 时间轴回放 |
+| 冻结 Spec + Holdout（P1-⑦） | 优化前冻结验收标准（sha256 指纹），只对最终 best 状态做隐藏留出多轮评估，防过拟合验收 |
 
 ## 存储管理（三层缓存，存储友好设计）
 
@@ -153,6 +156,26 @@ python scripts/resource_cli.py quota-check --size-gb 1.5   # 下载前预检
 | `AUTOREPRO_L0_QUOTA_GB` | L0 热缓存配额 | `20` |
 | `AUTOREPRO_DEPS_ROOT` | 隔离依赖安装根 | `data/deps` |
 | `AUTOREPRO_PIP_INDEX` | pip 下载源（镜像级共享与注入共用） | 清华镜像 |
+
+## 工程可信度增强（ScholarAgent 融合）
+
+面向「复现结论可信」的工程防线（P0 移植 + P1 增强，参照 ScholarAgent 的
+证据链 / 经验库 / 防泄漏理念落地）：
+
+| 机制 | 位置 | 说明 |
+|---|---|---|
+| 补丁安全策略（P0-①） | `src/safety/patch_policy.py` | 优化补丁禁改数据/权重/评测文件、禁越目录、单文件体积预算，结构化拒绝决策 |
+| 快照指纹（P0-④） | `src/safety/workspace_snapshot.py` | 全工作区 SHA-256 指纹 + 运行中篡改检测（不一致即中止恢复） |
+| 经验库（P0-③） | `src/experience/experience_store.py` | JSONL 持久化 `validated` 标记、上限截断、summarize/best，供 BeamUCT 播种先验 |
+| TrialLedger（P0-⑤） | `src/experience/trial_ledger.py` | Keep/Reject 结构化账本（candidate/评估/理由/restored），供报告与经验库消费 |
+| 证据链（P0-②） | `src/evidence/` | 证据注册表（SHA-256 + authentic）、裁决门控（无真实执行证据不判 verified）、Claim/Criterion/Evidence 图 |
+| BeamUCT 双层搜索（P1-⑥） | `src/optimizer/beam_uct.py` | 方向级 UCB + 参数树 UCT + Beam top-k，经验库摘要播种先验，方向退役 |
+| 冻结 Spec + Holdout（P1-⑦） | `src/optimizer/` | ResearchSpec sha256 冻结验收，只对最终 best 状态隐藏留出多轮评估 |
+| 静态依赖解析 + pip 自愈（P1-⑧） | `src/agents/dependency_resolver.py` | AST+requirements 双源解析、stdlib 过滤、运行时缺模块 pip 自愈（≤3 轮） |
+| 确定性仓库发现链（P1-⑨） | `src/agents/repo_discovery.py` | 用户URL→PwC→GitHub搜索→curated 四级降级链 + revision pin + 溯源标记 |
+| 防泄漏 Benchmark（P1-⑩） | `src/benchmark/leakage_safe.py` | 确定性 hash 切分、隐藏标签私有目录、指标契约冻结后端复算（纯 Python 零依赖） |
+| 沙箱加固（P1-⑪） | `src/agents/code_executor.py` | 镜像白名单、cap-drop ALL、no-new-privileges、只读 rootfs+tmpfs、非 root、CPU/mem/pids 限额（随可用性降级） |
+| 用量计量（P1-⑫） | `src/audit/audit_logger.py` | plan 级 LLM token 统计（response_metadata 提取）与容器耗时维度，`get_stats()` 汇总 |
 
 ## 两种模式
 
@@ -250,7 +273,20 @@ AutoReproducer/
 │   ├── test_env_builder_base.py  # 共享底座镜像（P1-1）
 │   ├── test_dataset_registry.py  # 数据集注册表与数据策略（P1-2）
 │   ├── test_resource_cli.py      # 三层缓存 CLI（P2）
-│   └── test_orchestrator_storage.py  # 编排器存储钩子（P0-2）
+│   ├── test_orchestrator_storage.py  # 编排器存储钩子（P0-2）
+│   ├── test_patch_policy.py       # 补丁安全策略（P0-①）
+│   ├── test_workspace_snapshot.py # 快照指纹（P0-④）
+│   ├── test_experience_store.py   # 经验库（P0-③）
+│   ├── test_trial_ledger.py       # TrialLedger 账本（P0-⑤）
+│   ├── test_evidence_graph.py     # 证据链（P0-②）
+│   ├── test_beam_uct_fusion.py    # BeamUCT 双层搜索（P1-⑥）
+│   ├── test_frozen_spec.py        # 冻结 Spec + Holdout（P1-⑦）
+│   ├── test_dependency_resolver.py# 静态依赖解析（P1-⑧）
+│   ├── test_repo_discovery.py     # 确定性仓库发现链（P1-⑨）
+│   ├── test_leakage_safe_benchmark.py # 防泄漏 Benchmark（P1-⑩）
+│   ├── test_sandbox_hardening.py  # 沙箱加固（P1-⑪）
+│   ├── test_usage_metering.py     # 用量计量（P1-⑫）
+│   └── test_reproduction_core.py  # 复现核心链路
 ├── scripts/
 │   ├── resource_cli.py        # 三层缓存管理 CLI（archive/restore/prune/status…）
 │   ├── generate_sample_paper.py
@@ -261,21 +297,32 @@ AutoReproducer/
 │   ├── dataset_registry.py    # 数据集注册表（别名/体积/子集策略/镜像，P1-2）
 │   ├── base_agent.py          # Agent 基类（含 system_prompt、实验账本封装）
 │   ├── corpus.py              # 语料对照层（PaperBench）
+│   ├── safety/
+│   │   ├── patch_policy.py    # 补丁安全策略（P0-①）
+│   │   └── workspace_snapshot.py # 快照指纹（P0-④）
+│   ├── experience/
+│   │   ├── experience_store.py # 经验库（P0-③）
+│   │   └── trial_ledger.py     # TrialLedger 账本（P0-⑤）
+│   ├── evidence/               # 证据链（P0-②）
+│   ├── benchmark/              # 防泄漏 Benchmark（P1-⑩）
 │   ├── agents/
 │   │   ├── paper_reader.py    # 论文解析 Agent（PDF/标题输入透传）
-│   │   ├── resource_finder.py # 资源查找 Agent
+│   │   ├── resource_finder.py # 资源查找 Agent（确定性发现链 P1-⑨）
 │   │   ├── env_builder.py     # 环境构建 Agent（5 轮依赖诊断 + 底座镜像构建）
-│   │   ├── code_executor.py   # 代码执行 Agent（隔离依赖安装，smoke+full 双阶段）
+│   │   ├── dependency_resolver.py # 静态依赖解析 + pip 自愈（P1-⑧）
+│   │   ├── repo_discovery.py  # 确定性仓库发现链（P1-⑨）
+│   │   ├── code_executor.py   # 代码执行 Agent（smoke+full+沙箱加固 P1-⑪）
 │   │   ├── result_validator.py# 结果验证 Agent（指标提取 + 口径归一化）
 │   │   ├── verifier.py        # 质量验证 Agent（Prompt-Free）
-│   │   ├── optimizer.py       # 智能优化 Agent（UCB 预算调度）
+│   │   ├── optimizer.py       # 智能优化 Agent（UCB 预算调度 + 冻结 Spec P1-⑦）
 │   │   └── report_generator.py# 报告生成 Agent（含审计/优化/验证记录）
 │   ├── optimizer/
-│   │   └── ucb_scheduler.py   # UCB 多臂老虎机调度器
+│   │   ├── ucb_scheduler.py   # UCB 多臂老虎机调度器
+│   │   └── beam_uct.py        # BeamUCT 双层搜索 + 先验播种（P1-⑥）
 │   ├── llm/
 │   │   └── llm_client.py   # LLM API 客户端（OpenAI 兼容；Mock 任务精确分发）
 │   └── audit/
-│       └── audit_logger.py    # 审计日志 + 实验账本（replay 回放）
+│       └── audit_logger.py    # 审计日志 + 实验账本 + plan 级用量计量（P1-⑫）
 ├── references/
 │   └── paperbench/            # 语料对照层数据：PaperBench 23 篇论文复现提交物
 └── data/                      # L0 热缓存：repos/datasets/manifests/archive/deps
