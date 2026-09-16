@@ -571,16 +571,22 @@ class ResourceManager:
                 "percent": round(100.0 * total / max(self.quota_bytes, 1), 1),
                 "per_root": per_root}
 
-    def enforce_quota(self, dry_run: bool = True) -> List[Dict]:
+    def enforce_quota(self, dry_run: bool = True,
+                      excess_bytes: Optional[int] = None) -> List[Dict]:
         """超限时按最近使用（mtime 旧->新）返回建议归档清单。
+
+        excess_bytes 用于"预计超限"场景（如拉取前配额预检）：
+        传入预计超额字节，即使当前未超限也能给出按 LRU 排列的
+        释放建议；不传则按当前实际占用计算。
 
         默认 dry_run=True 只建议不删除（P2 CLI 中 prune 需用户显式确认）。
         返回 [{paper_id, bytes, human, last_used, reason}]。
         """
         usage = self.quota_usage()
-        if usage["bytes"] <= self.quota_bytes:
+        if usage["bytes"] <= self.quota_bytes and excess_bytes is None:
             return []
-        excess = usage["bytes"] - self.quota_bytes
+        excess = (excess_bytes if excess_bytes is not None
+                  else usage["bytes"] - self.quota_bytes)
         candidates: List[Dict] = []
         for root in (self.repos_root, self.datasets_root):
             if not root.is_dir():
