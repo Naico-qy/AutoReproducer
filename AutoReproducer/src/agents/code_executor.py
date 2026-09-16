@@ -32,6 +32,9 @@ from typing import Dict, List, Optional
 from src.base_agent import BaseAgent
 from src.llm.llm_client import LLMClient
 from src.agents.env_builder import PIP_INDEX_URL, PIP_FIND_LINKS
+from src.agents.dependency_resolver import (
+    find_missing_module, python_package_for,
+)
 
 LOCAL_TIMEOUT_SMOKE = 10
 LOCAL_TIMEOUT_FULL = 60
@@ -39,6 +42,9 @@ DOCKER_TIMEOUT_SMOKE = 30
 DOCKER_TIMEOUT_FULL = 300
 # 本地依赖安装超时（numpy/matplotlib/torch 等大包需要更长时间）
 LOCAL_PIP_TIMEOUT = 300
+# 运行时缺模块自我修复上限：缺包 -> 隔离安装 -> 重跑，最多 3 轮
+# （对齐 ScholarAgent coder.py 的 MAX_SELF_CORRECTIONS=3）
+MAX_PIP_SELF_HEAL = 3
 # 进程内依赖安装结果缓存：依赖清单文本 -> ""(已就绪) 或 失败诊断文本。
 # smoke/full/多次优化重跑共用一个进程，只对同一清单安装一次；
 # 失败也缓存，避免反复重装浪费时间。
@@ -110,6 +116,9 @@ class CodeExecutorAgent(BaseAgent):
         self.mock_mode = mock_mode
         # 最近一次依赖就绪的隔离安装目录（供执行时注入 PYTHONPATH）
         self._deps_dir: Optional[str] = None
+        # 运行时自愈补装的隔离目录集合（data/deps/heal-<module>/），
+        # 全部注入 PYTHONPATH，与依赖清单目录不互相污染。
+        self._heal_dirs: set = set()
 
     def run(self, input_data: dict) -> dict:
         """执行论文代码（smoke test + full run）。
@@ -385,6 +394,8 @@ class CodeExecutorAgent(BaseAgent):
 
         执行前按 env_config 依赖清单自动安装依赖（_ensure_local_deps），
         依赖安装失败时直接返回失败诊断，不浪费脚本执行预算。
+        脚本运行失败且 stderr 命中缺失模块时，走运行时自愈：
+        隔离安装 -> 重跑，最多 MAX_PIP_SELF_HEAL 轮（见 _self_heal_local）。
         """
         cleanup = workdir is None
         if workdir is None:
@@ -407,18 +418,27 @@ class CodeExecutorAgent(BaseAgent):
             with open(script, "w", encoding="utf-8") as f:
                 f.write(code)
 
-            result = subprocess.run(
-                [sys.executable, script],
-                capture_output=True, text=True, timeout=timeout,
-                cwd=workdir,
-                env=self._exec_env())
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode,
-                "deps_prepared": True,
-            }
+            result = self._run_local_script(script, workdir, timeout)
+            # 运行时缺模块自愈：识别缺失模块 -> 隔离安装 -> 重跑（≤3 轮）
+            healed = []
+            for _ in range(MAX_PIP_SELF_HEAL):
+                if result.get("success"):
+                    break
+                module = find_missing_module(result.get("stderr", "") or "")
+                if not module:
+                    break
+                err = self._heal_install_local(module)
+                heal = {"module": module,
+                        "package": python_package_for(module),
+                        "ok": err is None, "error": err}
+                healed.append(heal)
+                if err:
+                    break
+                result = self._run_local_script(script, workdir, timeout)
+            if healed:
+                result = {**result, "healed": healed}
+            result["deps_prepared"] = True
+            return result
         except subprocess.TimeoutExpired:
             return {"success": False, "stdout": "",
                     "stderr": f"执行超时({timeout}s, {stage})", "exit_code": -1,
@@ -429,6 +449,64 @@ class CodeExecutorAgent(BaseAgent):
         finally:
             if cleanup:
                 shutil.rmtree(workdir, ignore_errors=True)
+
+    def _run_local_script(self, script: str, workdir: str,
+                          timeout: int) -> Dict:
+        """执行 run.py 一次（子进程，注入隔离依赖 PYTHONPATH）。"""
+        result = subprocess.run(
+            [sys.executable, script],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=workdir, env=self._exec_env())
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.returncode,
+            "deps_prepared": True,
+        }
+
+    def _heal_install_local(self, module: str) -> Optional[str]:
+        """把缺失模块对应 PyPI 包隔离安装到 data/deps/heal-<module>/。
+
+        None 表示成功（含 mock 模式短路与磁盘 ready 复用）；
+        返回诊断文本表示安装失败。heal 目录独立于依赖清单目录，
+        避免污染清单缓存的 .ready 语义；同一模块全局只装一次。
+        """
+        package = python_package_for(module)
+        if self.mock_mode:
+            # mock 演示：不触网、不装大包，视为就绪
+            self._deps_dir == self._deps_dir  # noqa: B015 保持无副作用
+            return None
+        heal_dir = DEPS_CACHE_ROOT / f"heal-{module}"
+        ready_mark = heal_dir / _DEPS_READY_MARK
+        if ready_mark.is_file():
+            self._heal_dirs.add(str(heal_dir))
+            self.log("self_heal", "RUNNING",
+                     f"复用自愈目录 {heal_dir.name}（{package}）")
+            return None
+        try:
+            heal_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [sys.executable, "-m", "pip", "install",
+                   "--disable-pip-version-check", "-q",
+                   "--target", str(heal_dir),
+                   "-i", PIP_INDEX_URL]
+            if PIP_FIND_LINKS:
+                cmd += ["--find-links", PIP_FIND_LINKS]
+            cmd += [package]
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=LOCAL_PIP_TIMEOUT)
+            if res.returncode == 0:
+                ready_mark.write_text("ok\n", encoding="utf-8")
+                self._heal_dirs.add(str(heal_dir))
+                self.log("self_heal", "SUCCESS",
+                         f"自愈安装完成 {module}->{package}: {heal_dir.name}")
+                return None
+            detail = (res.stderr or res.stdout or "").strip()[-400:]
+            return f"自愈安装失败({package} exit={res.returncode}): {detail}"
+        except subprocess.TimeoutExpired:
+            return f"自愈安装超时({LOCAL_PIP_TIMEOUT}s): {package}"
+        except Exception as e:
+            return f"自愈安装异常: {e}"
 
     def _ensure_local_deps(self, workdir: str) -> Optional[str]:
         """确保本地执行环境已安装论文依赖；None 表示就绪，否则返回诊断文本。
@@ -515,17 +593,23 @@ class CodeExecutorAgent(BaseAgent):
     def _exec_env(self) -> Dict:
         """构造子进程执行环境：依赖隔离目录存在时注入 PYTHONPATH。
 
-        隔离安装的包（data/deps/<hash>/）经 PYTHONPATH 前置，使子进程
-        import 优先命中隔离目录，不污染全局 site-packages；无隔离目录时
-        返回环境副本（行为与改造前一致）。
+        隔离安装的包（data/deps/<hash>/ + 自愈 heal-<module>/ 目录）经
+        PYTHONPATH 前置，使子进程 import 优先命中隔离目录，不污染全局
+        site-packages；无隔离目录时返回环境副本（行为与改造前一致）。
         """
         env = os.environ.copy()
+        paths = []
         if self._deps_dir:
+            paths.append(self._deps_dir)
+        # 自愈目录排序注入，保证多模块顺序确定
+        paths.extend(sorted(self._heal_dirs))
+        if paths:
             existing = env.get("PYTHONPATH", "")
+            joined = os.pathsep.join(paths)
             if existing:
-                env["PYTHONPATH"] = self._deps_dir + os.pathsep + existing
+                env["PYTHONPATH"] = joined + os.pathsep + existing
             else:
-                env["PYTHONPATH"] = self._deps_dir
+                env["PYTHONPATH"] = joined
         return env
 
     def _execute_code_docker(self, code: str, stage: str,
@@ -560,27 +644,63 @@ class CodeExecutorAgent(BaseAgent):
             with open(script, "w", encoding="utf-8") as f:
                 f.write(code)
             mount = workdir.replace("\\", "/")
-            cmd = [docker_cmd, "run", "--rm",
-                   "-v", f"{mount}:/app", "-w", "/app"]
+            base_cmd = [docker_cmd, "run", "--rm",
+                        "-v", f"{mount}:/app", "-w", "/app"]
+            healed: list = []
+            # runner 命令构造：python:3.11-slim 基础镜像场景把 requirements
+            # 与自愈补装包都前置到 pip 安装（容器每次 --rm 不保留现场，
+            # 缺包必须累积进命令重跑）；自定义 image_tag 镜像假定已含依赖，
+            # 仅做脚本运行（缺包时同样改走 pip 前置自愈）。
+            def _make_runner(heal_pkgs: list) -> list:
+                install_parts = [f"pip install -i {PIP_INDEX_URL} ",
+                                 f"--find-links {PIP_FIND_LINKS} "]
+                if reqs:
+                    install_parts.append("-r /app/requirements.txt ")
+                if heal_pkgs:
+                    install_parts.append(" ".join(heal_pkgs) + " ")
+                install_parts.append("-q && python run.py")
+                return ["sh", "-c", "".join(install_parts)]
+
+            reqs_file = None
             if image == "python:3.11-slim" and reqs:
-                with open(os.path.join(workdir, "requirements.txt"), "w",
-                          encoding="utf-8") as f:
+                reqs_file = os.path.join(workdir, "requirements.txt")
+                with open(reqs_file, "w", encoding="utf-8") as f:
                     f.write(reqs)
-                runner = ["sh", "-c",
-                          f"pip install -i {PIP_INDEX_URL} "
-                          f"--find-links {PIP_FIND_LINKS} "
-                          "-r /app/requirements.txt -q && python run.py"]
-            else:
-                runner = ["python", "run.py"]
-            cmd += [image] + runner
-            result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=timeout)
-            return {
+
+            # 运行时缺模块自愈（≤MAX_PIP_SELF_HEAL 轮）：识别缺失模块 ->
+            # 累积进 pip 前置命令 -> 重跑；容器现场不保留，所以每轮都
+            # 携带全部已识别缺包。
+            result = None
+            seen = set()
+            for _ in range(MAX_PIP_SELF_HEAL + 1):
+                runner = (_make_runner(healed_pkgs := [h["package"]
+                           for h in healed])
+                          if (image == "python:3.11-slim" and reqs)
+                          or healed else ["python", "run.py"])
+                cmd = base_cmd + [image] + runner
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                        timeout=timeout)
+                if result.returncode == 0:
+                    break
+                module = find_missing_module(result.stderr or "")
+                if not module or module in seen \
+                        or len(healed) >= MAX_PIP_SELF_HEAL:
+                    break
+                seen.add(module)
+                healed.append({"module": module,
+                               "package": python_package_for(module),
+                               "ok": True, "error": None})
+                self.log("self_heal", "RUNNING",
+                         f"Docker 缺模块 {module},累积重跑")
+            result = {
                 "success": result.returncode == 0,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.returncode,
             }
+            if healed:
+                result["healed"] = healed
+            return result
         except subprocess.TimeoutExpired:
             return {"success": False, "stdout": "",
                     "stderr": f"执行超时({timeout}s, {stage})", "exit_code": -1}

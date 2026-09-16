@@ -14,6 +14,9 @@ import tempfile
 from typing import Dict, List
 from src.base_agent import BaseAgent
 from src.llm.llm_client import LLMClient
+from src.agents.dependency_resolver import (
+    dependency_root, resolve_dependencies,
+)
 
 # 依赖诊断轮数（方案要求 5 轮）
 MAX_DIAGNOSE_ROUNDS = 5
@@ -114,6 +117,22 @@ class EnvBuilderAgent(BaseAgent):
         if corpus_deps:
             parsed["required_packages"] = corpus_deps
 
+        # 静态依赖解析（P1-⑧，融合 ScholarAgent detect_python_dependencies）：
+        # EnvBuilder 的依赖来源原本只有 LLM 从摘要猜测 + 语料 requirements，
+        # 与"代码实际 import 了什么"可能不一致（LLM 猜错/漏猜 -> 运行时
+        # ModuleNotFoundError）。这里用 AST + 声明文件做第二来源：
+        # 语料/声明依赖保持权威，静态解析只"补漏不覆盖"——代码里 import
+        # 了但声明清单缺失的包会被并入，避免覆盖语料的版本 pin。
+        static_deps = []
+        code_src = input_data.get("code") or ""
+        repo_path = input_data.get("repo_path") or ""
+        if code_src or repo_path:
+            static_deps = resolve_dependencies(
+                code=code_src or None, repo_path=repo_path or None)
+            if static_deps:
+                parsed["required_packages"] = self._merge_dependencies(
+                    parsed.get("required_packages", []), static_deps)
+
         # 依赖诊断（5 轮循环）：分类错误 -> 定点修复 -> 重验证
         diagnose_report = self.diagnose_dependencies(
             parsed.get("required_packages", []))
@@ -126,25 +145,47 @@ class EnvBuilderAgent(BaseAgent):
             "setup_commands": parsed.get("setup_commands", []),
             "estimated_disk_gb": parsed.get("estimated_disk_gb", 3.0),
             "dependency_diagnosis": diagnose_report,
+            "static_dependencies": static_deps,
+            "static_source": ("code" if code_src else "repo")
+                             if static_deps else "none",
         }
 
         self.log_experiment(
             "BUILD_ENV", "生成运行环境配置并完成依赖诊断",
-            inputs={"dependencies": deps},
+            inputs={"dependencies": deps, "static_dependencies": static_deps},
             outputs={"env_config": env_config, "diagnosis": diagnose_report},
             result={"rounds": diagnose_report.get("rounds"),
-                    "resolved": diagnose_report.get("resolved")},
-        )
+                    "resolved": diagnose_report.get("resolved"),
+                    "static_found": len(static_deps)})
         self.log("build_env", "SUCCESS",
                  f"环境配置生成完成,{len(parsed.get('required_packages', []))} 个依赖,"
-                 f"诊断 {diagnose_report.get('rounds', 0)} 轮",
+                 f"诊断 {diagnose_report.get('rounds', 0)} 轮"
+                 + (f",静态解析补充 {len(static_deps)} 个" if static_deps else ""),
                  {"packages": parsed.get("required_packages", []),
-                  "diagnosis": diagnose_report})
+                  "diagnosis": diagnose_report,
+                  "static_dependencies": static_deps})
 
         return {
             "env_config": env_config,
+            "static_dependencies": static_deps,
             "llm_calls": self._delta_llm_calls(),
         }
+
+    @staticmethod
+    def _merge_dependencies(base: List[str], extra: List[str]) -> List[str]:
+        """合并依赖清单：以 base 为权威，extra 仅补充 base 缺失的包名。
+
+        按 requirements token 的包根名比对（剥离版本与环境标记），
+        保持 base 顺序不变，新增包追加在尾部。
+        """
+        base_roots = {dependency_root(dep) for dep in base}
+        merged = list(base)
+        for dep in extra:
+            root = dependency_root(dep)
+            if root and root not in base_roots:
+                base_roots.add(root)
+                merged.append(dep)
+        return merged
 
     # ---------------- 依赖诊断 ----------------
 
