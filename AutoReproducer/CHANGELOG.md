@@ -5,6 +5,52 @@
 
 ---
 
+## [2026.09.16-0] - 2026-09-16
+
+### 新增（存储管理：按需懒加载 + 三层缓存 + 体积瘦身）
+
+解决「多篇论文复现累加后磁盘耗尽」：ImageNet 约 150GB vs CIFAR-10 仅 170MB，
+按需懒加载只拉当前任务最小集，任务完成归档后清理 L0。
+
+- **P0-1 ResourceManager（`src/resource_manager.py`）**：`fetch_code` /
+  `fetch_dataset` / `fetch_weights` 懒加载（git depth-1 克隆、冒烟子集、
+  本地/URL/HF 子路径权重），重复 fetch 幂等；manifest 生成/读取兼容
+  2026-09-09 存量格式；cleanup 记 `cleaned_at`；archive/restore 对接 L1
+  温存储（zip 内路径 `repos/<pid>/...` 与 restore 对齐）；L0 配额守护
+  `AUTOREPRO_L0_QUOTA_GB`（默认 20GB），超限按 LRU 给建议不自动删除。
+- **P0-2 编排器存储钩子（`src/orchestrator.py`）**：`paper_id`（corpus 键或
+  sha1(title)[:12]）注入数据上下文；FIND_RESOURCES 后自动 fetch、
+  COMPLETED 前生成 manifest + 统计；fetch 失败仅告警不阻断流水线。
+- **P0-3 隔离依赖安装（`src/agents/code_executor.py`）**：真实模式
+  `pip install --target data/deps/<sha1(reqs)>` 一次性安装 + `.ready`
+  磁盘就绪标记，执行时经 PYTHONPATH 注入隔离目录；同名依赖清单
+  跨论文只落一份天然去重，不污染全局 Python（`AUTOREPRO_DEPS_ROOT`
+  可覆盖）。此前真实模式无条件重装 torch（2GB+ 被 timeout 杀）的问题解除。
+- **P1-1 共享底座镜像（`src/agents/env_builder.py`）**：`autorepro-base`
+  （python:3.11-slim + CPU torch/torchvision/numpy/tqdm + 国内源注入），
+  `build_base_image` / `ensure_base_image` 一次构建多论文复用；论文
+  Dockerfile `FROM python:*` 自动替换为底座，底座缺失按需构建、失败
+  自动降级原 Dockerfile（`degraded` 标注不阻断）。
+- **P1-2 数据集注册表（`src/dataset_registry.py`）**：15 类常见数据集的
+  别名归一化 / 体积预估 / 子集策略（torchvision 内建懒加载、full、
+  percent:N 降采样、synthetic 零数据）/ 国内镜像备注 / 下载入口
+  （url: / hf: / script:）；ResourceManager 默认启用，`fetch_dataset`
+  按 kind 决策，未知或失败诚实降级合成冒烟集并注明非数值复现。
+- **P2 缓存管理 CLI（`scripts/resource_cli.py`）**：`status` / `list` /
+  `manifest` / `archive` / `restore` / `prune` / `quota-check` 七子命令
+  （argparse 纯净实现）；`prune --yes` 先归档 L1 再清理 L0（不丢数据）；
+  `quota-check` 拉取前预检，不足拒绝（退出码 2）并按 LRU 给释放建议；
+  `enforce_quota` 新增 `excess_bytes` 支持"预计超限"投影。
+
+### 测试
+
+- 新增 68 用例：存储钩子 8（test_orchestrator_storage）、底座镜像 13
+  （test_env_builder_base）、注册表策略 18（test_dataset_registry）、
+  CLI 12（test_resource_cli）、隔离依赖与既有资源管理 19 回归。
+- 全量 **201 passed, 1 skipped**（修复前 300s 卡死 → 21s 全绿）。
+
+---
+
 ## [2026.09.10-3] - 2026-09-10
 
 ### 修复（前端可观测性 / 诚实性，Batch 2）

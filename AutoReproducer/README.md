@@ -86,6 +86,74 @@ INIT → READ_PAPER → FIND_RESOURCES → BUILD_ENV → EXECUTE_CODE → VALIDA
 | 预算统计 | 全程 LLM 调用次数累计，纳入审计统计与报告（方案预算上限 100 次） |
 | 修正闭环 | 每步输出经 Prompt-Free 验证，失败按建议修正重试 1 次，全程留痕 |
 
+## 存储管理（三层缓存，存储友好设计）
+
+复现多篇论文 = 代码 + 数据集 + 预训练权重，多篇累加后普通笔记本磁盘（512GB-1TB）很快耗尽。数据集体积远超代码：ImageNet 约 150GB，而 CIFAR-10 仅 170MB。本项目按 **按需懒加载 + 三层存储 + 体积瘦身** 落地：
+
+| 层 | 载体 | 内容 | 生命周期 |
+|---|---|---|---|
+| **L0 热缓存** | 本地磁盘 `data/` | 当前任务的代码 / 数据子集 / 权重 | 任务完成并归档后清理 |
+| **L1 温存储** | 移动硬盘 / NAS / 网盘 | 已复现论文完整快照（zip 归档） | `resource_cli` archive / restore |
+| **L2 冷存储** | HuggingFace / ModelScope | 只存清单 + 按 ID 可重现下载 | 不落地 |
+
+### 按需懒加载（ResourceManager，`src/resource_manager.py`）
+
+- `fetch_code` / `fetch_dataset` / `fetch_weights`：只拉当前任务最小集（代码仓库 depth 1 克隆、数据集冒烟子集、权重本地复制或按子路径下载），重复 fetch 幂等复用缓存，绝不重复下载；
+- `manifest`：每篇论文的资源清单写入 `data/manifests/<paper_id>.json`（兼容 2026-09-09 存量格式），`cleaned_at` 记录清理时间；
+- **L0 配额守护**：`AUTOREPRO_L0_QUOTA_GB` 可配（默认 20GB），超限时 `enforce_quota` 按最近使用（LRU）返回建议归档清单，不自动删除；
+- 所有真实网络下载均"尽力而为"：网络不可用时诚实降级为本地合成冒烟集（`dataset_smoke`），在 `state` 字段标注实际状态，绝不静默伪造大文件。
+
+### 隔离依赖安装（P0-3）
+
+真实模式下 `pip install --target data/deps/<sha1(reqs)>` 一次性安装到隔离目录并落 `.ready` 就绪标记，执行时经 **PYTHONPATH 注入** 该目录；同名依赖清单跨论文跨会话只落一份（多论文共享、天然去重），不污染全局 Python。`AUTOREPRO_DEPS_ROOT` 可覆盖根目录。
+
+### 镜像级共享（P1-1，`src/agents/env_builder.py`）
+
+- 底座镜像 `autorepro-base:latest`（`python:3.11-slim` + CPU torch/torchvision/numpy/tqdm + 国内源注入），**一次构建、多论文增量复用**——参考 SWE 领域 SWE-smith 实践（128 仓库共用统一底座镜像，存储/构建时间大幅下降）；
+- 论文 Dockerfile `FROM python:*` 自动替换为底座（`_swap_to_base_image`）；底座缺失时按需构建，构建失败自动降级原 Dockerfile 并带 `degraded` 标注，不阻断流水线；
+- `AUTOREPRO_PIP_INDEX` 可覆盖 pip 下载源（默认清华镜像，`PIP_FIND_LINKS` 指向阿里云 CPU wheels）。
+
+### 数据集注册表与复现级别数据策略（P1-2，`src/dataset_registry.py`）
+
+15 类常见数据集（MNIST / Fashion-MNIST / CIFAR-10/100 / SVHN / STL-10 / Tiny ImageNet / ImageNet-1k / COCO 2017 / SQuAD v1/v2 / IMDb / AG News / GLUE / WikiText-103 + 零数据合成标记），按 `kind` 决定子集策略：
+
+| kind | 策略 | 示例 |
+|---|---|---|
+| `torchvision` | 内建数据集，训练代码运行时懒加载，**不预下载** | CIFAR-10（170MB） |
+| `full` | 体积可控，直接全量 | SQuAD / AG News（≤120MB） |
+| `percent:N` | 超大数据降采样 N% 验证流程趋势（语义为流程验证而非数值复现） | ImageNet（150GB→1%）、COCO（25GB→5%） |
+| `synthetic` | 零数据，训练代码运行时合成，体积为 0 | PINN / GAN 类合成数据 |
+
+未知数据集返回 `None` → 自动降级合成冒烟集。注册表同时提供体积预估（`size_gb`）与国内镜像备注，供 fetch 前的选型与配额决策。
+
+### 缓存管理 CLI（P2，`scripts/resource_cli.py`）
+
+| 子命令 | 说明 |
+|---|---|
+| `status` | 查看 L0 配额占用与按论文统计 |
+| `list` / `manifest <pid>` | 列出已登记论文 / 查看单篇资源清单 |
+| `archive <pid> [--dest DIR]` | 归档 L0 资源到 L1 zip（默认 `data/archive/`） |
+| `restore <zip>` | 从 L1 归档恢复回 L0 |
+| `prune [--yes]` | 配额超限建议；`--yes` 先归档 L1 再清理 L0（不丢数据） |
+| `quota-check --size-gb N` | 拉取前配额预检：不足则拒绝（退出码 2）并给归档建议 |
+
+```bash
+python scripts/resource_cli.py status
+python scripts/resource_cli.py archive 2026abcd1234 --dest D:/nas/archive
+python scripts/resource_cli.py restore D:/nas/archive/2026abcd1234.zip
+python scripts/resource_cli.py prune --yes
+python scripts/resource_cli.py quota-check --size-gb 1.5   # 下载前预检
+```
+
+### 存储相关环境变量
+
+| 环境变量 | 说明 | 默认 |
+|---|---|---|
+| `AUTOREPRO_DATA_ROOT` | 缓存根（repos/datasets/manifests/archive/deps） | `<repo>/data` |
+| `AUTOREPRO_L0_QUOTA_GB` | L0 热缓存配额 | `20` |
+| `AUTOREPRO_DEPS_ROOT` | 隔离依赖安装根 | `data/deps` |
+| `AUTOREPRO_PIP_INDEX` | pip 下载源（镜像级共享与注入共用） | 清华镜像 |
+
 ## 两种模式
 
 - **Mock 模式**（默认）— 无需 LLM API / Docker，直接演示完整流程
@@ -178,16 +246,26 @@ AutoReproducer/
 ├── app.py                     # Streamlit 前端
 ├── requirements.txt           # 依赖清单
 ├── tests/
-│   └── test_architecture.py   # 完整 pytest 套件（单测+端到端）
+│   ├── test_architecture.py   # 完整 pytest 套件（单测+端到端）
+│   ├── test_env_builder_base.py  # 共享底座镜像（P1-1）
+│   ├── test_dataset_registry.py  # 数据集注册表与数据策略（P1-2）
+│   ├── test_resource_cli.py      # 三层缓存 CLI（P2）
+│   └── test_orchestrator_storage.py  # 编排器存储钩子（P0-2）
+├── scripts/
+│   ├── resource_cli.py        # 三层缓存管理 CLI（archive/restore/prune/status…）
+│   ├── generate_sample_paper.py
+│   └── run_optimization_demo.py
 ├── src/
-│   ├── orchestrator.py        # 编排器核心（状态机 + 验证闭环 + 预算统计）
+│   ├── orchestrator.py        # 编排器核心（状态机 + 验证闭环 + 预算统计 + 存储钩子）
+│   ├── resource_manager.py    # 资源懒加载 + L0 缓存/配额/归档（P0-1）
+│   ├── dataset_registry.py    # 数据集注册表（别名/体积/子集策略/镜像，P1-2）
 │   ├── base_agent.py          # Agent 基类（含 system_prompt、实验账本封装）
 │   ├── corpus.py              # 语料对照层（PaperBench）
 │   ├── agents/
 │   │   ├── paper_reader.py    # 论文解析 Agent（PDF/标题输入透传）
 │   │   ├── resource_finder.py # 资源查找 Agent
-│   │   ├── env_builder.py     # 环境构建 Agent（5 轮依赖诊断 + 真实镜像构建）
-│   │   ├── code_executor.py   # 代码执行 Agent（smoke+full 双阶段，本地/Docker）
+│   │   ├── env_builder.py     # 环境构建 Agent（5 轮依赖诊断 + 底座镜像构建）
+│   │   ├── code_executor.py   # 代码执行 Agent（隔离依赖安装，smoke+full 双阶段）
 │   │   ├── result_validator.py# 结果验证 Agent（指标提取 + 口径归一化）
 │   │   ├── verifier.py        # 质量验证 Agent（Prompt-Free）
 │   │   ├── optimizer.py       # 智能优化 Agent（UCB 预算调度）
@@ -200,7 +278,7 @@ AutoReproducer/
 │       └── audit_logger.py    # 审计日志 + 实验账本（replay 回放）
 ├── references/
 │   └── paperbench/            # 语料对照层数据：PaperBench 23 篇论文复现提交物
-└── data/                      # 日志 / 账本 / 报告（已 gitignore）
+└── data/                      # L0 热缓存：repos/datasets/manifests/archive/deps
 ```
 
 ## 团队成员分工
