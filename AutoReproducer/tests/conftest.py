@@ -15,6 +15,12 @@ os.environ.setdefault(
     "AUTOREPRO_DEPS_ROOT",
     str(Path(tempfile.mkdtemp(prefix="autorepro_deps_test_"))),
 )
+# ResourceManager 的数据根同样指向一次性临时目录，
+# 防止 e2e 流水线把 manifest/数据集写入项目 data/ 造成污染。
+os.environ.setdefault(
+    "AUTOREPRO_DATA_ROOT",
+    str(Path(tempfile.mkdtemp(prefix="autorepro_data_test_"))),
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
