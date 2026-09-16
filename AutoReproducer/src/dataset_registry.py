@@ -275,3 +275,40 @@ class DatasetRegistry:
         """体积预估；未知数据集返回 0.0（将由合成冒烟集兜底）。"""
         meta = self.lookup(dataset_name)
         return meta["size_gb"] if meta else 0.0
+
+    def benchmark_hint(self, dataset_name: str) -> Dict:
+        """防泄漏 Benchmark 评测接入点（P1-⑩）。
+
+        返回该数据集的评测采样建议与元信息，供
+        ResourceManager.prepare_leakage_safe_benchmark 决策：
+        - synthetic/零数据：评测链路用小样本（24 行）即可；
+        - percent:N 超大真实集：N 成比例小样本（24 + 2N），
+          语义为"链路验证"而非"数值复现"；
+        - 其他（lazy/full 小数据）：默认 1000 行上限。
+        未知数据集返回 found=False + 默认建议（合成存根可用）。
+        """
+        meta = self.lookup(dataset_name)
+        if meta is None:
+            return {"found": False, "dataset_name": dataset_name,
+                    "kind": "unknown", "subset": "unknown",
+                    "size_gb": 0.0, "recommended_max_samples": 1000}
+        subset = meta.get("subset", "")
+        if subset == "synthetic":
+            recommended = 24
+        elif subset.startswith("percent:"):
+            try:
+                percent = int(subset.split(":", 1)[1])
+            except (TypeError, ValueError):
+                percent = 1
+            recommended = 24 + 2 * percent
+        else:
+            recommended = 1000
+        return {
+            "found": True,
+            "dataset_name": meta.get("name", dataset_name),
+            "kind": meta.get("kind", ""),
+            "subset": subset,
+            "size_gb": meta.get("size_gb", 0.0),
+            "mirror": meta.get("mirror", ""),
+            "recommended_max_samples": recommended,
+        }

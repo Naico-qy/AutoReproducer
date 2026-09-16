@@ -400,6 +400,117 @@ class ResourceManager:
                 "note": "合成最小样本，仅用于流程验证，不用于数值复现",
             }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # ---------------- 防泄漏 Benchmark：L0 物化 + 私有标签 ----------------
+
+    def prepare_leakage_safe_benchmark(
+            self, paper_id: str, dataset_name: str = "CIFAR-10",
+            target_column: str = "",
+            hidden_root: Optional[str] = None,
+            public_dir: Optional[str] = None,
+            strategy: str = "hash",
+            task_type: str = "classification",
+            primary_metric: str = "",
+            target_score: Optional[float] = None,
+            max_samples: Optional[int] = None,
+            seed: int = 42) -> Dict:
+        """把注册表数据集物化为防泄漏测试集（P1-⑩，与 dataset_registry 集成）。
+
+        语义：评测关注"防泄漏机制 + 契约复算"链路本身，行数据用
+        合成存根（synthetic_rows_for，依数据集名稳定生成）；接入真实
+        数据时替换行来源即可，本方法签名与切分/泄漏逻辑不变。
+
+        布局（L0 内）：
+          public  = <data_root>/benchmark/<paper_id>/splits/
+                    （train / validation / preflight_features /
+                     test_features 公开特征，无 target 列）
+          private = hidden_root（默认 <data_root>/.hidden/<paper_id>/，
+                    沙箱工作区之外的私有目录，仅后端复算读取）
+
+        返回 {"state","detail","hidden_labels_path","test_features_path",
+              "leakage_report","contract","meta","manifest_path"}。
+        """
+        info: Dict = {"state": "skipped", "detail": ""}
+        try:
+            # 1. 注册表决策：数据集存在性 / 采样规模 / 元信息
+            hint: Dict = {}
+            lookup = getattr(self.dataset_registry, "benchmark_hint", None)
+            if callable(lookup):
+                hint = dict(lookup(dataset_name) or {})
+            else:
+                hint = {"found": False, "recommended_max_samples": 1000}
+            if max_samples is None:
+                max_samples = int(hint.get("recommended_max_samples", 1000))
+
+            # 合成行来源（真实数据接入时替换此步）
+            from src.benchmark.leakage_safe import (
+                materialize_benchmark,
+                freeze_metric_contract,
+                synthetic_rows_for,
+            )
+            rows = synthetic_rows_for(dataset_name, n=max_samples, seed=seed)
+            eval_task_type = task_type or "classification"
+            if not target_column:
+                target_column = "label"      # synthetic_rows_for 固定列
+
+            # 2. 物化：公开特征 + 私有隐藏标签 + 泄漏自检
+            bench_root = Path(public_dir) if public_dir else \
+                self.data_root / "benchmark" / (paper_id or "default")
+            hidden_root_path = Path(hidden_root) if hidden_root else \
+                self.data_root / ".hidden" / (paper_id or "default")
+            prepared = materialize_benchmark(
+                rows=rows,
+                target=target_column,
+                hidden_root=hidden_root_path,
+                public_dir=bench_root / "splits",
+                input_column="text",
+                task_type=eval_task_type,
+                strategy=strategy,
+                seed=seed,
+                max_samples=max_samples,
+                primary_metric=primary_metric,
+                target_score=target_score,
+            )
+            contract = freeze_metric_contract(
+                eval_task_type, primary_metric, target_score)
+
+            # 3. manifest 落盘（L0 可审计）
+            manifest_path = bench_root / "manifest.json"
+            manifest = dict(prepared.manifest)
+            manifest["dataset"] = {
+                "name": hint.get("dataset_name", dataset_name),
+                "registry_found": bool(hint.get("found")),
+                "kind": hint.get("kind", ""),
+                "subset": hint.get("subset", ""),
+                "size_gb": hint.get("size_gb", 0.0),
+            }
+            manifest["contract"] = contract
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+
+            info.update(
+                state="prepared",
+                detail=(f"防泄漏基准已物化: {dataset_name} "
+                        f"({strategy} 切分, {len(rows)} 行, "
+                        f"test {manifest['test_row_count']} 行)"),
+                hidden_labels_path=str(prepared.hidden_labels_path),
+                hidden_labels_sha256=manifest["hidden_labels_sha256"],
+                test_features_path=str(prepared.test_features_path),
+                preflight_features_path=str(
+                    prepared.preflight_features_path),
+                train_path=str(prepared.public_dir / "train.jsonl"),
+                validation_path=str(
+                    prepared.public_dir / "validation.jsonl"),
+                leakage_report=manifest["leakage_report"],
+                contract=contract,
+                meta=hint,
+                manifest_path=str(manifest_path),
+            )
+        except Exception as exc:      # 物化失败不伪造
+            info.update(state="unavailable",
+                        detail=f"基准物化失败: {str(exc)[-300:]}")
+        return info
+
     # ---------------- 懒加载：权重 ----------------
 
     def fetch_weights(self, paper_id: str, weights_ref: str,
